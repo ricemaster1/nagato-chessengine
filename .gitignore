@@ -1,0 +1,22 @@
+# Build
+target/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local stuff
+cutechess/
+
+# Tablebase files (too large for git)
+*.rtbw
+*.rtbz
+*.rtbm
+

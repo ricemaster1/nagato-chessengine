@@ -1,0 +1,14 @@
+[package]
+name = "nagato"
+version = "0.1.0"
+edition = "2021"
+description = "Nagato — a chess engine forged in Rust, named after the IJN Nagato"
+
+[dependencies]
+rand = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
