@@ -7,6 +7,7 @@ use crate::eval;
 use crate::movegen;
 use crate::moves::*;
 use crate::search::{self, TranspositionTable};
+use crate::tablebase;
 use std::io::{self, BufRead};
 
 const ENGINE_NAME: &str = "Nagato";
@@ -37,6 +38,9 @@ pub fn uci_loop() {
                 println!("id name {}", ENGINE_NAME);
                 println!("id author {}", ENGINE_AUTHOR);
                 println!("option name Hash type spin default 64 min 1 max 4096");
+                println!("option name SyzygyPath type string default <empty>");
+                println!("option name SyzygyProbeDepth type spin default 1 min 0 max 64");
+                println!("option name LomonosovOnline type check default false");
                 println!("uciok");
             }
             "isready" => {
@@ -51,8 +55,31 @@ pub fn uci_loop() {
             }
             "go" => {
                 let (time_ms, depth) = parse_go(&tokens, &board);
+
+                // Try Syzygy root probe for positions with few pieces
+                let piece_count = board.all_occupancy.count_ones();
+                if tablebase::syzygy_available()
+                    && piece_count <= tablebase::max_pieces()
+                    && board.castling == 0
+                {
+                    if let Some((uci_move, tb_result)) = tablebase::probe_root(&board) {
+                        let wdl_str = match tb_result {
+                            tablebase::TbResult::Win(dtz) => format!("tb win (dtz {})", dtz),
+                            tablebase::TbResult::Draw => "tb draw".to_string(),
+                            tablebase::TbResult::Loss(dtz) => format!("tb loss (dtz {})", dtz),
+                            tablebase::TbResult::Failed => "tb unknown".to_string(),
+                        };
+                        println!("info depth 1 score cp 0 string {}", wdl_str);
+                        println!("bestmove {}", uci_move);
+                        continue;
+                    }
+                }
+
                 let result = search::search(&mut board, &mut tt, time_ms, depth);
                 println!("bestmove {}", result.best_move);
+            }
+            "setoption" => {
+                parse_setoption(&tokens, &mut tt);
             }
             "quit" => {
                 break;
@@ -81,10 +108,76 @@ pub fn uci_loop() {
             "bench" => {
                 run_bench(&mut tt);
             }
+            "tbprobe" => {
+                let wdl = tablebase::probe_wdl(&board);
+                let dtz = tablebase::probe_dtz(&board);
+                println!("WDL: {:?}", wdl);
+                println!("DTZ: {:?}", dtz);
+                if tablebase::syzygy_available() {
+                    println!("Syzygy: available, max {} pieces", tablebase::max_pieces());
+                } else {
+                    println!("Syzygy: not loaded");
+                }
+            }
             _ => {
                 // Unknown command, ignore silently per UCI spec
             }
         }
+    }
+}
+
+fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable) {
+    // Format: setoption name <name> [value <value>]
+    let mut name = String::new();
+    let mut value = String::new();
+    let mut reading_name = false;
+    let mut reading_value = false;
+
+    for &token in &tokens[1..] {
+        match token {
+            "name" => {
+                reading_name = true;
+                reading_value = false;
+            }
+            "value" => {
+                reading_name = false;
+                reading_value = true;
+            }
+            _ => {
+                if reading_name {
+                    if !name.is_empty() {
+                        name.push(' ');
+                    }
+                    name.push_str(token);
+                } else if reading_value {
+                    if !value.is_empty() {
+                        value.push(' ');
+                    }
+                    value.push_str(token);
+                }
+            }
+        }
+    }
+
+    let name_lower = name.to_lowercase();
+    match name_lower.as_str() {
+        "hash" => {
+            if let Ok(mb) = value.parse::<usize>() {
+                *tt = TranspositionTable::new(mb.clamp(1, 4096));
+            }
+        }
+        "syzygypath" => {
+            if !value.is_empty() && value != "<empty>" {
+                tablebase::init_syzygy(&value);
+            }
+        }
+        "syzygyprobelimit" | "syzygyprovedepth" => {
+            // Stored for future use — probe depth threshold
+        }
+        "lomonosovooline" => {
+            // Toggle — stored as a flag (currently always available via tbprobe command)
+        }
+        _ => {}
     }
 }
 

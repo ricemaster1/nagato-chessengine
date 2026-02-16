@@ -5,6 +5,7 @@ use crate::board::Board;
 use crate::eval::{self, INFINITY, MATE_SCORE};
 use crate::movegen;
 use crate::moves::*;
+use crate::tablebase;
 use std::time::Instant;
 
 // ============================================================
@@ -281,6 +282,18 @@ fn alpha_beta(
                 if reps >= 1 {
                     return 0; // Draw by repetition
                 }
+            }
+        }
+    }
+
+    // Tablebase probe in search (only for positions with few pieces, no castling)
+    if ply > 0 {
+        let piece_count = board.all_occupancy.count_ones();
+        if piece_count <= tablebase::max_pieces() && board.castling == 0 {
+            let tb_result = tablebase::probe_wdl(board);
+            if let Some(tb_score) = tb_result.to_score(ply) {
+                info.nodes += 1;
+                return tb_score;
             }
         }
     }
