@@ -349,11 +349,32 @@ fn alpha_beta(
 
     // Null move pruning
     if do_null && !in_check && depth >= 3 && ply > 0 {
-        // Don't do null move if we only have pawns + king (zugzwang risk)
-        let non_pawn_material = board.occupancy[board.side.index()]
-            & !(board.pieces[board.side.index()][Piece::Pawn.index()]
-                | board.pieces[board.side.index()][Piece::King.index()]);
-        if non_pawn_material != 0 {
+        // Skip null move in zugzwang-prone positions.
+        // Zugzwang is most dangerous in endgames with limited material:
+        //   - Only pawns + king
+        //   - Single minor piece + pawns
+        //   - Rook + pawns with no other pieces
+        // Safe to null-move if we have sufficient piece diversity.
+        let us = board.side.index();
+        let our_queens = board.pieces[us][Piece::Queen.index()];
+        let our_rooks = board.pieces[us][Piece::Rook.index()];
+        let our_bishops = board.pieces[us][Piece::Bishop.index()];
+        let our_knights = board.pieces[us][Piece::Knight.index()];
+        let non_pawn_material = board.occupancy[us]
+            & !(board.pieces[us][Piece::Pawn.index()]
+                | board.pieces[us][Piece::King.index()]);
+        let minor_count = our_bishops.count_ones() + our_knights.count_ones();
+        let major_count = our_rooks.count_ones() + our_queens.count_ones();
+
+        // Allow null move if:
+        //   - Has any non-pawn material AND (has a queen, or 2+ pieces, or rook+minor)
+        //   - This blocks: lone king, K+minor+pawns, K+rook+pawns (zugzwang prone)
+        let null_safe = non_pawn_material != 0
+            && (our_queens != 0
+                || (major_count + minor_count) >= 2
+                || (our_rooks != 0 && minor_count >= 1));
+
+        if null_safe {
             board.make_null_move();
             let r = if depth >= 6 { 3 } else { 2 }; // Adaptive null move reduction
             let null_score = -alpha_beta(board, tt, info, exp, depth - 1 - r, -beta, -beta + 1, ply + 1, false);
@@ -399,26 +420,39 @@ fn alpha_beta(
 
         let mut score;
 
-        // Late Move Reductions (LMR)
+        // Late Move Reductions (LMR) — dynamic formula
+        // Skip LMR in very sparse endgames (5 or fewer pieces) — every move is critical
+        let few_pieces = board.all_occupancy.count_ones() <= 5;
         if moves_searched >= 3
             && depth >= 3
             && !in_check
             && !m.is_capture()
             && !m.is_promotion()
             && !board.in_check()
+            && !few_pieces
         {
-            // Reduce depth for later quiet moves
-            let mut reduction = 1;
-            if moves_searched >= 6 {
-                reduction = 2;
+            // Base reduction from ln(depth) * ln(moves_searched)
+            let ln_depth = (depth as f32).ln();
+            let ln_moves = (moves_searched as f32).ln();
+            let mut reduction = (0.75 + ln_depth * ln_moves / 2.5) as i32;
+
+            // Reduce more for moves with bad history
+            let hist_score = info.history[board.side.index()][m.from_sq() as usize][m.to_sq() as usize];
+            if hist_score < 0 {
+                reduction += 1;
             }
-            if moves_searched >= 12 {
-                reduction = 3;
+            // Reduce less for moves with good history
+            if hist_score > 1000 {
+                reduction -= 1;
             }
-            // Reduce less for killers
+
+            // Reduce less for killer moves
             if ply < 128 && (m.0 == info.killers[ply][0].0 || m.0 == info.killers[ply][1].0) {
-                reduction = reduction.max(1) - 1;
+                reduction -= 1;
             }
+
+            // Clamp: at least 1 ply reduction, never reduce below depth 1
+            reduction = reduction.clamp(1, depth - 2);
 
             let reduced_depth = (depth - 1 - reduction).max(1);
             score = -alpha_beta(board, tt, info, exp, reduced_depth, -alpha - 1, -alpha, ply + 1, true);
