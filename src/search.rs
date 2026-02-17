@@ -9,11 +9,14 @@ use crate::moves::*;
 use std::time::Instant;
 
 // ============================================================
-// Transposition Table
+// Transposition Table — 4-entry bucket with depth-preferred replacement
 // ============================================================
+
+const TT_BUCKET_SIZE: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TTFlag {
+    None,  // Empty slot
     Exact,
     Alpha, // Upper bound (fail-low)
     Beta,  // Lower bound (fail-high)
@@ -26,44 +29,103 @@ pub struct TTEntry {
     pub score: i32,
     pub flag: TTFlag,
     pub best_move: Move,
+    pub generation: u8,
+}
+
+impl TTEntry {
+    const EMPTY: TTEntry = TTEntry {
+        hash: 0,
+        depth: 0,
+        score: 0,
+        flag: TTFlag::None,
+        best_move: MOVE_NONE,
+        generation: 0,
+    };
 }
 
 pub struct TranspositionTable {
-    entries: Vec<Option<TTEntry>>,
-    size: usize,
+    buckets: Vec<[TTEntry; TT_BUCKET_SIZE]>,
+    num_buckets: usize,
+    pub generation: u8,
 }
 
 impl TranspositionTable {
     pub fn new(size_mb: usize) -> Self {
-        let entry_size = std::mem::size_of::<Option<TTEntry>>();
-        let size = (size_mb * 1024 * 1024) / entry_size;
+        let bucket_size = std::mem::size_of::<[TTEntry; TT_BUCKET_SIZE]>();
+        let num_buckets = (size_mb * 1024 * 1024) / bucket_size;
         TranspositionTable {
-            entries: vec![None; size],
-            size,
+            buckets: vec![[TTEntry::EMPTY; TT_BUCKET_SIZE]; num_buckets],
+            num_buckets,
+            generation: 0,
         }
+    }
+
+    /// Increment generation counter (called at the start of each search)
+    pub fn new_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
     }
 
     #[inline]
     pub fn probe(&self, hash: u64) -> Option<&TTEntry> {
-        let idx = (hash as usize) % self.size;
-        self.entries[idx].as_ref().filter(|e| e.hash == hash)
+        let idx = (hash as usize) % self.num_buckets;
+        let bucket = &self.buckets[idx];
+        for entry in bucket.iter() {
+            if entry.hash == hash && entry.flag != TTFlag::None {
+                return Some(entry);
+            }
+        }
+        None
     }
 
     #[inline]
     pub fn store(&mut self, hash: u64, depth: i8, score: i32, flag: TTFlag, best_move: Move) {
-        let idx = (hash as usize) % self.size;
-        // Always-replace scheme (simple but effective)
-        // Prefer deeper entries or exact entries
-        if let Some(existing) = &self.entries[idx] {
-            if existing.hash == hash && existing.depth > depth as i8 && existing.flag == TTFlag::Exact {
-                return; // Don't overwrite a deeper exact entry for the same position
+        let idx = (hash as usize) % self.num_buckets;
+        let bucket = &mut self.buckets[idx];
+        let gen = self.generation;
+
+        // Find the best slot to replace:
+        // 1. Empty slot → use immediately
+        // 2. Same position → always update (keeps info fresh)
+        // 3. Otherwise → pick the least valuable entry to replace
+        //    Value = depth, penalized if from an old generation
+        let mut replace_idx = 0;
+        let mut worst_value = i32::MAX;
+
+        for (i, entry) in bucket.iter().enumerate() {
+            // Empty slot — best possible target
+            if entry.flag == TTFlag::None {
+                replace_idx = i;
+                break;
+            }
+            // Same position — always replace
+            if entry.hash == hash {
+                replace_idx = i;
+                break;
+            }
+            // Score this slot: lower is more replaceable
+            // Entries from the current generation are more valuable
+            let age_penalty = if entry.generation != gen { 4 } else { 0 };
+            let value = entry.depth as i32 - age_penalty;
+            if value < worst_value {
+                worst_value = value;
+                replace_idx = i;
             }
         }
-        self.entries[idx] = Some(TTEntry { hash, depth: depth as i8, score, flag, best_move });
+
+        bucket[replace_idx] = TTEntry {
+            hash,
+            depth,
+            score,
+            flag,
+            best_move,
+            generation: gen,
+        };
     }
 
     pub fn clear(&mut self) {
-        self.entries.fill(None);
+        for bucket in self.buckets.iter_mut() {
+            *bucket = [TTEntry::EMPTY; TT_BUCKET_SIZE];
+        }
     }
 }
 
@@ -345,6 +407,7 @@ fn alpha_beta(
                         return beta;
                     }
                 }
+                TTFlag::None => {} // unreachable — probe filters empty slots
             }
         }
     }
@@ -561,6 +624,9 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, ti
     info.start_time = start_time;
     info.time_limit_ms = time_limit_ms;
     info.max_depth = max_depth;
+
+    // Increment TT generation for age-based replacement
+    tt.new_generation();
 
     let mut best_move = MOVE_NONE;
     let mut best_score = 0;
