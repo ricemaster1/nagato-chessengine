@@ -149,6 +149,9 @@ pub struct SearchInfo {
     // Counter move heuristic: indexed by [piece_that_moved_last][to_sq_of_last_move]
     // Stores the quiet move that refuted the opponent's last move
     pub counter_moves: [[Move; 64]; 6],
+
+    // Static eval at each ply, for "improving" detection
+    pub eval_stack: [i32; 128],
 }
 
 impl SearchInfo {
@@ -162,6 +165,7 @@ impl SearchInfo {
             killers: [[MOVE_NONE; 2]; 128],
             history: [[[0; 64]; 64]; 2],
             counter_moves: [[MOVE_NONE; 64]; 6],
+            eval_stack: [0; 128],
         }
     }
 
@@ -412,6 +416,9 @@ fn alpha_beta(
         }
     }
 
+    // PV node detection: a node where the search window is wider than a null window
+    let is_pv = beta - alpha > 1;
+
     // Experience probe — compute a small eval correction if we've been here before
     let exp_correction = if let Some(exp_entry) = exp.probe(board.hash) {
         // Use experience best move as fallback if TT has nothing
@@ -470,10 +477,25 @@ fn alpha_beta(
         }
     }
 
+    // Static evaluation for this node (used by RFP and improving detection)
+    let static_eval = if !in_check {
+        eval::evaluate(board) + exp_correction
+    } else {
+        0 // Don't evaluate when in check
+    };
+
+    // Store static eval in eval stack for improving detection
+    if ply < 128 {
+        info.eval_stack[ply] = static_eval;
+    }
+
+    // "Improving" flag: our static eval is better than it was 2 plies ago.
+    // If improving, the position is trending in our favor → be less aggressive with pruning.
+    let improving = !in_check && ply >= 2 && ply < 128 && static_eval > info.eval_stack[ply - 2];
+
     // Reverse futility pruning (static eval pruning)
     if !in_check && depth <= 3 && ply > 0 {
-        let static_eval = eval::evaluate(board) + exp_correction;
-        let margin = 120 * depth;
+        let margin = if improving { 100 * depth } else { 120 * depth };
         if static_eval - margin >= beta {
             return static_eval - margin;
         }
@@ -500,7 +522,7 @@ fn alpha_beta(
 
         let mut score;
 
-        // Late Move Reductions (LMR) — dynamic formula
+        // Late Move Reductions (LMR) — enhanced dynamic formula
         // Skip LMR in very sparse endgames (5 or fewer pieces) — every move is critical
         let few_pieces = board.all_occupancy.count_ones() <= 5;
         if moves_searched >= 3
@@ -516,14 +538,22 @@ fn alpha_beta(
             let ln_moves = (moves_searched as f32).ln();
             let mut reduction = (0.75 + ln_depth * ln_moves / 2.5) as i32;
 
-            // Reduce more for moves with bad history
-            let hist_score = info.history[board.side.index()][m.from_sq() as usize][m.to_sq() as usize];
-            if hist_score < 0 {
-                reduction += 1;
-            }
-            // Reduce less for moves with good history
-            if hist_score > 1000 {
+            // PV nodes: reduce less (we want to search PV lines more carefully)
+            if is_pv {
                 reduction -= 1;
+            }
+
+            // Improving: reduce less when our eval is trending up
+            if improving {
+                reduction -= 1;
+            }
+
+            // History-based adjustment: scale by history score
+            let hist_score = info.history[board.side.index()][m.from_sq() as usize][m.to_sq() as usize];
+            if hist_score < -500 {
+                reduction += 1; // Bad history: reduce more
+            } else if hist_score > 2000 {
+                reduction -= 1; // Strong history: reduce less
             }
 
             // Reduce less for killer moves
