@@ -20,3 +20,6 @@ cutechess/
 *.rtbz
 *.rtbm
 
+# Experience data (generated at runtime)
+*.exp
+
