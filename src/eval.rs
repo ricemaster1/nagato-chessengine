@@ -326,11 +326,17 @@ fn eval_mobility(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
 
 fn eval_king_safety(board: &Board, mg: &mut [i32; 2], _eg: &mut [i32; 2]) {
     for color in 0..COLOR_COUNT {
-        let king_sq = board.king_sq(if color == 0 { Color::White } else { Color::Black });
+        let us = color;
+        let them = color ^ 1;
+        let us_color = if color == 0 { Color::White } else { Color::Black };
+        let king_sq = board.king_sq(us_color);
         let king_file = file_of(king_sq) as usize;
-        let our_pawns = board.pieces[color][Piece::Pawn.index()];
+        let our_pawns = board.pieces[us][Piece::Pawn.index()];
+        let all_occ = board.all_occupancy;
 
-        // Pawn shield bonus (for kings on the flanks in the midgame)
+        // =============================================
+        // Part 1: Pawn shield (retained from before)
+        // =============================================
         if king_file <= 2 || king_file >= 5 {
             let shield_files: Vec<usize> = match king_file {
                 0 => vec![0, 1, 2],
@@ -342,15 +348,155 @@ fn eval_king_safety(board: &Board, mg: &mut [i32; 2], _eg: &mut [i32; 2]) {
                 _ => vec![],
             };
 
-            let shield_rank = if color == 0 { RANK_2 | RANK_3 } else { RANK_6 | RANK_7 };
+            let shield_rank = if us == 0 { RANK_2 | RANK_3 } else { RANK_6 | RANK_7 };
 
             for &f in &shield_files {
                 if our_pawns & FILES[f] & shield_rank != 0 {
-                    mg[color] += 10;
+                    mg[us] += 10;
                 } else {
-                    mg[color] -= 15;
+                    mg[us] -= 15;
                 }
             }
+        }
+
+        // =============================================
+        // Part 2: King attack model — weighted piece attacks on the king zone
+        // =============================================
+        // King zone = king's square + all squares the king attacks (typically 8-9 squares)
+        let king_zone = movegen::king_attacks(king_sq) | square_bb(king_sq);
+
+        // Attacker weights by piece type
+        const ATTACK_WEIGHT: [i32; 6] = [
+            0,  // Pawn (handled via pawn shield)
+            2,  // Knight
+            2,  // Bishop
+            3,  // Rook
+            5,  // Queen
+            0,  // King
+        ];
+
+        // Safety table: maps attacker count → danger score (non-linear scaling)
+        // More attackers = exponentially more dangerous
+        const SAFETY_TABLE: [i32; 8] = [0, 0, 50, 75, 88, 95, 97, 99];
+
+        let mut attacker_count: i32 = 0;
+        let mut attacker_weight: i32 = 0;
+        let mut attack_value: i32 = 0;
+
+        // Knight attacks on king zone
+        let mut knights = board.pieces[them][Piece::Knight.index()];
+        while knights != 0 {
+            let sq = pop_lsb(&mut knights);
+            let attacks = movegen::knight_attacks(sq);
+            let zone_attacks = popcount(attacks & king_zone) as i32;
+            if zone_attacks > 0 {
+                attacker_count += 1;
+                attacker_weight += ATTACK_WEIGHT[Piece::Knight.index()];
+                attack_value += zone_attacks * 5;
+            }
+        }
+
+        // Bishop attacks on king zone
+        let mut bishops = board.pieces[them][Piece::Bishop.index()];
+        while bishops != 0 {
+            let sq = pop_lsb(&mut bishops);
+            let attacks = movegen::bishop_attacks(sq, all_occ);
+            let zone_attacks = popcount(attacks & king_zone) as i32;
+            if zone_attacks > 0 {
+                attacker_count += 1;
+                attacker_weight += ATTACK_WEIGHT[Piece::Bishop.index()];
+                attack_value += zone_attacks * 5;
+            }
+        }
+
+        // Rook attacks on king zone
+        let mut rooks = board.pieces[them][Piece::Rook.index()];
+        while rooks != 0 {
+            let sq = pop_lsb(&mut rooks);
+            let attacks = movegen::rook_attacks(sq, all_occ);
+            let zone_attacks = popcount(attacks & king_zone) as i32;
+            if zone_attacks > 0 {
+                attacker_count += 1;
+                attacker_weight += ATTACK_WEIGHT[Piece::Rook.index()];
+                attack_value += zone_attacks * 6;
+            }
+        }
+
+        // Queen attacks on king zone
+        let mut queens = board.pieces[them][Piece::Queen.index()];
+        while queens != 0 {
+            let sq = pop_lsb(&mut queens);
+            let attacks = movegen::queen_attacks(sq, all_occ);
+            let zone_attacks = popcount(attacks & king_zone) as i32;
+            if zone_attacks > 0 {
+                attacker_count += 1;
+                attacker_weight += ATTACK_WEIGHT[Piece::Queen.index()];
+                attack_value += zone_attacks * 4;
+            }
+        }
+
+        // Safe checks: enemy pieces that could check the king on squares
+        // not defended by our pieces (excluding pawns, which are handled separately)
+        let our_occ = board.occupancy[us];
+        // Compute squares attacked by our minor/major pieces for "safe check" detection
+        let our_pawn_attacks = {
+            let our_pawns = board.pieces[us][Piece::Pawn.index()];
+            if us == 0 {
+                ((our_pawns & !FILE_A) << 7) | ((our_pawns & !FILE_H) << 9)
+            } else {
+                ((our_pawns & !FILE_H) >> 7) | ((our_pawns & !FILE_A) >> 9)
+            }
+        };
+        // Squares considered "safe" for enemy: not occupied by enemy, not defended by our pawns
+        let safe_squares = !board.occupancy[them] & !our_pawn_attacks;
+
+        // Knight safe checks
+        let knight_check_sqs = movegen::knight_attacks(king_sq) & safe_squares;
+        let mut their_knights = board.pieces[them][Piece::Knight.index()];
+        while their_knights != 0 {
+            let sq = pop_lsb(&mut their_knights);
+            if movegen::knight_attacks(sq) & knight_check_sqs != 0 {
+                attack_value += 15;
+            }
+        }
+
+        // Bishop safe checks (diagonal checks)
+        let bishop_check_sqs = movegen::bishop_attacks(king_sq, all_occ) & safe_squares;
+        let mut their_bishops = board.pieces[them][Piece::Bishop.index()];
+        while their_bishops != 0 {
+            let sq = pop_lsb(&mut their_bishops);
+            if movegen::bishop_attacks(sq, all_occ) & bishop_check_sqs != 0 {
+                attack_value += 12;
+            }
+        }
+
+        // Rook safe checks (rank/file checks)
+        let rook_check_sqs = movegen::rook_attacks(king_sq, all_occ) & safe_squares;
+        let mut their_rooks = board.pieces[them][Piece::Rook.index()];
+        while their_rooks != 0 {
+            let sq = pop_lsb(&mut their_rooks);
+            if movegen::rook_attacks(sq, all_occ) & rook_check_sqs != 0 {
+                attack_value += 18;
+            }
+        }
+
+        // Queen safe checks (both diagonals and rank/file)
+        let queen_check_sqs = (movegen::bishop_attacks(king_sq, all_occ) | movegen::rook_attacks(king_sq, all_occ)) & safe_squares;
+        let mut their_queens = board.pieces[them][Piece::Queen.index()];
+        while their_queens != 0 {
+            let sq = pop_lsb(&mut their_queens);
+            if movegen::queen_attacks(sq, all_occ) & queen_check_sqs != 0 {
+                attack_value += 20;
+            }
+        }
+
+        // Scale by number of attackers (non-linear) and attacker weight
+        if attacker_count >= 2 {
+            let table_idx = attacker_count.min(7) as usize;
+            let scale = SAFETY_TABLE[table_idx];
+            // Combine: attack_value * scale / 100, weighted by attacker composition
+            let raw_danger = (attack_value as i32 + attacker_weight * 8) * scale / 100;
+            mg[us] -= raw_danger; // Only applies in midgame — king safety matters less in endgame
         }
     }
 }
