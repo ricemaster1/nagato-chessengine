@@ -332,3 +332,149 @@ impl GameRecorder {
         self.positions.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::moves::MOVE_NONE;
+    use std::path::PathBuf;
+
+    fn make_entry(hash: u64, depth: i8, score: i16, result: f32) -> ExpEntry {
+        ExpEntry {
+            hash,
+            best_move: MOVE_NONE,
+            depth,
+            score,
+            game_result: result,
+            count: 1,
+        }
+    }
+
+    #[test]
+    fn test_store_and_probe() {
+        let mut table = ExpTable::new();
+        let entry = make_entry(0xDEADBEEF, 8, 150, 1.0);
+        table.store(entry);
+
+        let probed = table.probe(0xDEADBEEF);
+        assert!(probed.is_some());
+        let p = probed.unwrap();
+        assert_eq!(p.hash, 0xDEADBEEF);
+        assert_eq!(p.depth, 8);
+        assert_eq!(p.score, 150);
+        assert_eq!(p.count, 1);
+    }
+
+    #[test]
+    fn test_probe_miss() {
+        let table = ExpTable::new();
+        assert!(table.probe(0x12345678).is_none());
+    }
+
+    #[test]
+    fn test_merge_same_position_keeps_deeper() {
+        let mut table = ExpTable::new();
+        table.store(make_entry(0xAAAA, 6, 100, 1.0));
+        table.store(make_entry(0xAAAA, 10, 200, 0.0));
+
+        let p = table.probe(0xAAAA).unwrap();
+        assert_eq!(p.depth, 10, "should keep the deeper entry's depth");
+        assert_eq!(p.score, 200, "should keep the deeper entry's score");
+        assert_eq!(p.count, 2, "count should increment");
+    }
+
+    #[test]
+    fn test_merge_blends_game_result() {
+        let mut table = ExpTable::new();
+        table.store(make_entry(0xBBBB, 8, 100, 1.0)); // win
+        table.store(make_entry(0xBBBB, 8, 100, 0.0)); // loss
+
+        let p = table.probe(0xBBBB).unwrap();
+        // Running average: (1.0 * 1/2) + (0.0 * 1/2) = 0.5
+        assert!((p.game_result - 0.5).abs() < 0.01, "game result should blend to ~0.5");
+    }
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        let mut table = ExpTable::new();
+        table.store(make_entry(0x1111, 5, 50, 1.0));
+        table.store(make_entry(0x2222, 10, -30, 0.0));
+        table.store(make_entry(0x3333, 7, 0, 0.5));
+
+        let path = PathBuf::from("/tmp/nagato_test_exp.bin");
+        table.save(&path).expect("save should succeed");
+
+        let mut loaded = ExpTable::new();
+        let count = loaded.load(&path).expect("load should succeed");
+        assert_eq!(count, 3);
+
+        let p1 = loaded.probe(0x1111).unwrap();
+        assert_eq!(p1.depth, 5);
+        assert_eq!(p1.score, 50);
+
+        let p2 = loaded.probe(0x2222).unwrap();
+        assert_eq!(p2.depth, 10);
+        assert_eq!(p2.score, -30);
+
+        let p3 = loaded.probe(0x3333).unwrap();
+        assert_eq!(p3.depth, 7);
+        assert!((p3.game_result - 0.5).abs() < 0.01);
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_nonexistent_returns_zero() {
+        let mut table = ExpTable::new();
+        let count = table.load(Path::new("/tmp/nagato_doesnt_exist.bin")).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_game_recorder_minimum_depth() {
+        let mut recorder = GameRecorder::new();
+        recorder.set_our_color(0);
+
+        // Depth 3 — should be ignored
+        recorder.record(0xAAAA, MOVE_NONE, 3, 100, 0);
+        assert_eq!(recorder.recorded_count(), 0);
+
+        // Depth 4 — should be recorded
+        recorder.record(0xBBBB, MOVE_NONE, 4, 200, 0);
+        assert_eq!(recorder.recorded_count(), 1);
+    }
+
+    #[test]
+    fn test_game_recorder_flush_win() {
+        let mut recorder = GameRecorder::new();
+        let mut table = ExpTable::new();
+        recorder.set_our_color(0); // We're white
+
+        // Record a position where white was to move
+        recorder.record(0xAAAA, MOVE_NONE, 8, 100, 0);
+        // Record a position where black was to move
+        recorder.record(0xBBBB, MOVE_NONE, 6, -50, 1);
+
+        recorder.flush(&mut table, GameResult::Win);
+
+        // White's position: we won, so game_result = 1.0
+        let p1 = table.probe(0xAAAA).unwrap();
+        assert!((p1.game_result - 1.0).abs() < 0.01);
+
+        // Black's position: we (white) won, so from black's perspective = 0.0
+        let p2 = table.probe(0xBBBB).unwrap();
+        assert!((p2.game_result - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_table_len() {
+        let mut table = ExpTable::new();
+        assert_eq!(table.len(), 0);
+        assert!(table.is_empty());
+
+        table.store(make_entry(0x1111, 5, 50, 1.0));
+        assert_eq!(table.len(), 1);
+        assert!(!table.is_empty());
+    }
+}
