@@ -123,6 +123,23 @@ impl SearchInfo {
 }
 
 // ============================================================
+// Edge pawn escape detection
+// ============================================================
+
+/// Returns true if this move is a pawn capturing from the A/H file to the B/G file.
+/// These captures are structurally significant: the pawn gains two-directional
+/// capture coverage after escaping the edge.
+#[inline]
+fn is_edge_pawn_escape(m: Move) -> bool {
+    if m.piece() != Piece::Pawn || (!m.is_capture() && !m.is_en_passant()) {
+        return false;
+    }
+    let from_file = m.from_sq() % 8;
+    let to_file = m.to_sq() % 8;
+    (from_file == 0 && to_file == 1) || (from_file == 7 && to_file == 6)
+}
+
+// ============================================================
 // Move ordering
 // ============================================================
 
@@ -137,7 +154,13 @@ fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt
             let see_val = eval::see(board, m);
             if see_val >= 0 {
                 // Winning/equal captures: above killers, ordered by MVV-LVA
-                scores[i] = 1_000_000 + eval::mvv_lva_score(m);
+                let mut cap_score = 1_000_000 + eval::mvv_lva_score(m);
+                // Edge pawn escape bonus: prioritize captures that unlock
+                // pawn coverage by moving off the A/H file
+                if is_edge_pawn_escape(m) {
+                    cap_score += 15_000;
+                }
+                scores[i] = cap_score;
             } else {
                 // Losing captures: below killers and history, ordered by SEE
                 scores[i] = -100_000 + see_val;
@@ -386,6 +409,10 @@ fn alpha_beta(
             continue;
         }
 
+        // Edge pawn escape extension: search one ply deeper when a pawn
+        // captures off the A/H file to B/G, gaining full coverage.
+        let edge_ext = if !in_check && is_edge_pawn_escape(m) { 1 } else { 0 };
+
         let mut score;
 
         // Late Move Reductions (LMR)
@@ -418,7 +445,7 @@ fn alpha_beta(
             }
         } else if moves_searched > 0 {
             // PVS: search with null window first
-            score = -alpha_beta(board, tt, info, depth - 1, -alpha - 1, -alpha, ply + 1, true);
+            score = -alpha_beta(board, tt, info, depth - 1 + edge_ext, -alpha - 1, -alpha, ply + 1, true);
         } else {
             // First move: full window search
             score = alpha + 1; // Force full search below
@@ -426,7 +453,7 @@ fn alpha_beta(
 
         // Full window re-search if needed
         if score > alpha {
-            score = -alpha_beta(board, tt, info, depth - 1, -beta, -alpha, ply + 1, true);
+            score = -alpha_beta(board, tt, info, depth - 1 + edge_ext, -beta, -alpha, ply + 1, true);
         }
 
         board.unmake_move(m);
@@ -720,5 +747,82 @@ mod tests {
         assert!(eval::is_mate_score(result.score), "Should find mate in 7");
         let mate_moves = eval::mate_in(result.score);
         assert!(mate_moves <= 7, "Should be mate in at most 7, got mate in {}", mate_moves);
+    }
+
+    // ---- Edge pawn escape tests ----
+
+    #[test]
+    fn test_is_edge_pawn_escape_a_to_b() {
+        // Pawn on a2 capturing to b3 (from sq 8, to sq 17)
+        let m = Move::new_with_capture(8, 17, FLAG_CAPTURE, Piece::Pawn, Piece::Pawn);
+        assert!(is_edge_pawn_escape(m));
+    }
+
+    #[test]
+    fn test_is_edge_pawn_escape_h_to_g() {
+        // Pawn on h4 capturing to g5 (from sq 31, to sq 38)
+        let m = Move::new_with_capture(31, 38, FLAG_CAPTURE, Piece::Pawn, Piece::Knight);
+        assert!(is_edge_pawn_escape(m));
+    }
+
+    #[test]
+    fn test_is_not_edge_escape_interior_pawn() {
+        // Pawn on d4 capturing to e5 — not an edge escape
+        let m = Move::new_with_capture(27, 36, FLAG_CAPTURE, Piece::Pawn, Piece::Pawn);
+        assert!(!is_edge_pawn_escape(m));
+    }
+
+    #[test]
+    fn test_is_not_edge_escape_quiet_move() {
+        // Pawn on a2 pushing to a3 — not a capture, not an escape
+        let m = Move::new(8, 16, 0, Piece::Pawn);
+        assert!(!is_edge_pawn_escape(m));
+    }
+
+    #[test]
+    fn test_edge_escape_ordering_boost() {
+        setup();
+        // White pawn on a5, Black pawn on b6 — AxB is an edge escape capture
+        // Compare move score vs. a similar non-edge capture
+        let mut board = Board::from_fen("8/8/1p1p4/P1P5/8/8/8/4K2k w - - 0 1").unwrap();
+        let mut list = MoveList::new();
+        movegen::generate_moves(&mut board, &mut list);
+
+        let info = SearchInfo::new();
+        let scores = score_moves(&list, &board, &info, 0, MOVE_NONE);
+
+        // Find scores for the two captures
+        let mut edge_score = None;
+        let mut interior_score = None;
+        for i in 0..list.len() {
+            let m = list.moves[i];
+            if m.is_capture() && m.piece() == Piece::Pawn {
+                let from_file = m.from_sq() % 8;
+                if from_file == 0 {
+                    edge_score = Some(scores[i]);
+                } else {
+                    interior_score = Some(scores[i]);
+                }
+            }
+        }
+
+        if let (Some(e), Some(i)) = (edge_score, interior_score) {
+            assert!(e > i, "Edge pawn escape ({}) should outscore interior capture ({})", e, i);
+        }
+    }
+
+    #[test]
+    fn test_edge_pawn_escape_finds_capture() {
+        setup();
+        // Position where capturing off the edge is clearly the best pawn move
+        // White pawn on a6, Black rook on b7, White king e1, Black king h8
+        let mut board = Board::from_fen("7k/1r6/P7/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let mut tt = TranspositionTable::new(16);
+        let result = search(&mut board, &mut tt, 2000, 8);
+        // The engine should find axb7 — winning a rook and escaping the edge
+        let best = result.best_move;
+        assert!(best.is_capture(), "Should capture the rook");
+        assert_eq!(best.from_sq() % 8, 0, "Should be from A-file");
+        assert_eq!(best.to_sq() % 8, 1, "Should capture to B-file");
     }
 }
