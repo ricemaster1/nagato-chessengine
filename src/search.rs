@@ -127,12 +127,17 @@ impl SearchInfo {
 // ============================================================
 
 fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt_move: Move, exp: &ExpTable) -> Vec<i32> {
+    // Probe experience once per position
+    let exp_move = exp.probe(board.hash).map(|e| e.best_move);
+
     let mut scores = vec![0i32; list.len()];
     for i in 0..list.len() {
         let m = list.moves[i];
 
         if m.0 == tt_move.0 && !tt_move.is_null() {
             scores[i] = 10_000_000; // TT move first
+        } else if exp_move.is_some() && m.0 == exp_move.unwrap().0 && !exp_move.unwrap().is_null() {
+            scores[i] = 5_000_000; // Experience best move — between TT and captures
         } else if m.is_capture() || m.is_en_passant() {
             scores[i] = 1_000_000 + eval::mvv_lva_score(m);
         } else if m.is_promotion() {
@@ -318,6 +323,21 @@ fn alpha_beta(
         }
     }
 
+    // Experience probe — compute a small eval correction if we've been here before
+    let exp_correction = if let Some(exp_entry) = exp.probe(board.hash) {
+        // Use experience best move as fallback if TT has nothing
+        if tt_move.is_null() && !exp_entry.best_move.is_null() {
+            tt_move = exp_entry.best_move;
+        }
+        // Correction: game_result is 0.0 (loss) to 1.0 (win), expected is 0.5.
+        // Nudge eval toward reality. Scale by confidence (more games = stronger).
+        let confidence = (exp_entry.count as f32).min(16.0) / 16.0; // caps at 16 games
+        let outcome_delta = exp_entry.game_result - 0.5; // -0.5 to +0.5
+        (outcome_delta * 60.0 * confidence) as i32 // max ±30cp
+    } else {
+        0
+    };
+
     // Null move pruning
     if do_null && !in_check && depth >= 3 && ply > 0 {
         // Don't do null move if we only have pawns + king (zugzwang risk)
@@ -342,7 +362,7 @@ fn alpha_beta(
 
     // Reverse futility pruning (static eval pruning)
     if !in_check && depth <= 3 && ply > 0 {
-        let static_eval = eval::evaluate(board);
+        let static_eval = eval::evaluate(board) + exp_correction;
         let margin = 120 * depth;
         if static_eval - margin >= beta {
             return static_eval - margin;
