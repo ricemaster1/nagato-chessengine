@@ -23,6 +23,7 @@ pub fn uci_loop() {
     let mut exp_path = PathBuf::from("nagato.exp");
     let mut exp_table = ExpTable::new();
     let mut recorder = GameRecorder::new();
+    let mut use_experience = true;
 
     // Load experience from previous sessions
     match exp_table.load(&exp_path) {
@@ -60,7 +61,7 @@ pub fn uci_loop() {
             }
             "ucinewgame" => {
                 // Save any experience from the previous game before resetting
-                if recorder.recorded_count() > 0 {
+                if use_experience && recorder.recorded_count() > 0 {
                     // If we don't know the result, treat it as a draw
                     recorder.flush(&mut exp_table, learn::GameResult::Draw);
                     if let Err(e) = exp_table.save(&exp_path) {
@@ -76,39 +77,46 @@ pub fn uci_loop() {
             }
             "go" => {
                 let (time_ms, depth) = parse_go(&tokens, &board);
-                recorder.set_our_color(board.side.index() as u8);
-                let result = search::search(&mut board, &mut tt, &exp_table, time_ms, depth);
+                if use_experience {
+                    recorder.set_our_color(board.side.index() as u8);
+                }
+                let exp_ref = if use_experience { &exp_table } else { &ExpTable::new() };
+                let result = search::search(&mut board, &mut tt, exp_ref, time_ms, depth);
                 // Record position for experience learning
-                recorder.record(
-                    board.hash,
-                    result.best_move,
-                    result.depth as i8,
-                    result.score.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-                    board.side.index() as u8,
-                );
+                if use_experience {
+                    recorder.record(
+                        board.hash,
+                        result.best_move,
+                        result.depth as i8,
+                        result.score.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                        board.side.index() as u8,
+                    );
+                }
                 println!("bestmove {}", result.best_move);
             }
             "gameover" => {
-                // Non-standard but supported: "gameover win", "gameover loss", "gameover draw"
-                let result = if tokens.len() >= 2 {
-                    match tokens[1] {
-                        "win" => learn::GameResult::Win,
-                        "loss" => learn::GameResult::Loss,
-                        _ => learn::GameResult::Draw,
+                if use_experience {
+                    // Non-standard but supported: "gameover win", "gameover loss", "gameover draw"
+                    let result = if tokens.len() >= 2 {
+                        match tokens[1] {
+                            "win" => learn::GameResult::Win,
+                            "loss" => learn::GameResult::Loss,
+                            _ => learn::GameResult::Draw,
+                        }
+                    } else {
+                        learn::GameResult::Draw
+                    };
+                    recorder.flush(&mut exp_table, result);
+                    if let Err(e) = exp_table.save(&exp_path) {
+                        eprintln!("info string could not save experience: {}", e);
+                    } else {
+                        eprintln!("info string experience saved ({} entries)", exp_table.len());
                     }
-                } else {
-                    learn::GameResult::Draw
-                };
-                recorder.flush(&mut exp_table, result);
-                if let Err(e) = exp_table.save(&exp_path) {
-                    eprintln!("info string could not save experience: {}", e);
-                } else {
-                    eprintln!("info string experience saved ({} entries)", exp_table.len());
                 }
             }
             "quit" => {
                 // Flush any remaining experience before exiting
-                if recorder.recorded_count() > 0 {
+                if use_experience && recorder.recorded_count() > 0 {
                     recorder.flush(&mut exp_table, learn::GameResult::Draw);
                     let _ = exp_table.save(&exp_path);
                 }
@@ -139,7 +147,7 @@ pub fn uci_loop() {
                 run_bench(&mut tt);
             }
             "setoption" => {
-                parse_setoption(&tokens, &mut tt, &mut exp_path, &mut exp_table);
+                parse_setoption(&tokens, &mut tt, &mut exp_path, &mut exp_table, &mut use_experience);
             }
             _ => {
                 // Unknown command, ignore silently per UCI spec
@@ -148,7 +156,7 @@ pub fn uci_loop() {
     }
 }
 
-fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable, exp_path: &mut PathBuf, exp_table: &mut ExpTable) {
+fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable, exp_path: &mut PathBuf, exp_table: &mut ExpTable, use_experience: &mut bool) {
     // Format: setoption name <name> [value <value>]
     let mut name = String::new();
     let mut value = String::new();
@@ -188,6 +196,12 @@ fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable, exp_path: &mut 
                     Ok(_) => {}
                     Err(e) => eprintln!("info string could not load experience: {}", e),
                 }
+            }
+        }
+        "experience" => {
+            *use_experience = value.eq_ignore_ascii_case("true");
+            if !*use_experience {
+                eprintln!("info string experience learning disabled");
             }
         }
         _ => {}
