@@ -83,6 +83,10 @@ pub struct SearchInfo {
 
     // History heuristic: indexed by [color][from][to]
     pub history: [[[i32; 64]; 64]; 2],
+
+    // Counter move heuristic: indexed by [piece_that_moved_last][to_sq_of_last_move]
+    // Stores the quiet move that refuted the opponent's last move
+    pub counter_moves: [[Move; 64]; 6],
 }
 
 impl SearchInfo {
@@ -95,6 +99,7 @@ impl SearchInfo {
             stopped: false,
             killers: [[MOVE_NONE; 2]; 128],
             history: [[[0; 64]; 64]; 2],
+            counter_moves: [[MOVE_NONE; 64]; 6],
         }
     }
 
@@ -110,6 +115,7 @@ impl SearchInfo {
                 }
             }
         }
+        // Counter moves persist across iterations (not reset per depth)
     }
 
     #[inline]
@@ -127,9 +133,17 @@ impl SearchInfo {
 // Move ordering
 // ============================================================
 
-fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt_move: Move, exp: &ExpTable) -> Vec<i32> {
+fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt_move: Move, exp: &ExpTable, prev_move: Move) -> Vec<i32> {
     // Probe experience once per position
     let exp_move = exp.probe(board.hash).map(|e| e.best_move);
+
+    // Look up the counter move for the opponent's previous move
+    let counter = if !prev_move.is_null() {
+        let cm = info.counter_moves[prev_move.piece().index()][prev_move.to_sq() as usize];
+        if cm.is_null() { None } else { Some(cm) }
+    } else {
+        None
+    };
 
     let mut scores = vec![0i32; list.len()];
     for i in 0..list.len() {
@@ -155,6 +169,8 @@ fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt
             scores[i] = 800_000;
         } else if ply < 128 && m.0 == info.killers[ply][1].0 {
             scores[i] = 700_000;
+        } else if counter.is_some() && m.0 == counter.unwrap().0 {
+            scores[i] = 650_000; // Counter move — between killer 2 and history
         } else {
             // History heuristic
             scores[i] = info.history[board.side.index()][m.from_sq() as usize][m.to_sq() as usize];
@@ -259,6 +275,7 @@ fn alpha_beta(
     beta: i32,
     ply: usize,
     do_null: bool,
+    prev_move: Move,
 ) -> i32 {
     // Check extension: extend search when in check
     let in_check = board.in_check();
@@ -377,7 +394,7 @@ fn alpha_beta(
         if null_safe {
             board.make_null_move();
             let r = if depth >= 6 { 3 } else { 2 }; // Adaptive null move reduction
-            let null_score = -alpha_beta(board, tt, info, exp, depth - 1 - r, -beta, -beta + 1, ply + 1, false);
+            let null_score = -alpha_beta(board, tt, info, exp, depth - 1 - r, -beta, -beta + 1, ply + 1, false, MOVE_NONE);
             board.unmake_null_move();
 
             if info.stopped {
@@ -403,7 +420,7 @@ fn alpha_beta(
     let mut list = MoveList::new();
     movegen::generate_moves(board, &mut list);
 
-    let mut scores = score_moves(&list, board, info, ply, tt_move, exp);
+    let mut scores = score_moves(&list, board, info, ply, tt_move, exp, prev_move);
 
     let mut best_move = MOVE_NONE;
     let mut best_score = -INFINITY;
@@ -455,15 +472,15 @@ fn alpha_beta(
             reduction = reduction.clamp(1, depth - 2);
 
             let reduced_depth = (depth - 1 - reduction).max(1);
-            score = -alpha_beta(board, tt, info, exp, reduced_depth, -alpha - 1, -alpha, ply + 1, true);
+            score = -alpha_beta(board, tt, info, exp, reduced_depth, -alpha - 1, -alpha, ply + 1, true, m);
 
             // Re-search at full depth if LMR score is above alpha
             if score > alpha {
-                score = -alpha_beta(board, tt, info, exp, depth - 1, -alpha - 1, -alpha, ply + 1, true);
+                score = -alpha_beta(board, tt, info, exp, depth - 1, -alpha - 1, -alpha, ply + 1, true, m);
             }
         } else if moves_searched > 0 {
             // PVS: search with null window first
-            score = -alpha_beta(board, tt, info, exp, depth - 1, -alpha - 1, -alpha, ply + 1, true);
+            score = -alpha_beta(board, tt, info, exp, depth - 1, -alpha - 1, -alpha, ply + 1, true, m);
         } else {
             // First move: full window search
             score = alpha + 1; // Force full search below
@@ -471,7 +488,7 @@ fn alpha_beta(
 
         // Full window re-search if needed
         if score > alpha {
-            score = -alpha_beta(board, tt, info, exp, depth - 1, -beta, -alpha, ply + 1, true);
+            score = -alpha_beta(board, tt, info, exp, depth - 1, -beta, -alpha, ply + 1, true, m);
         }
 
         board.unmake_move(m);
@@ -495,10 +512,15 @@ fn alpha_beta(
                 }
 
                 if score >= beta {
-                    // Store killer moves
+                    // Store killer moves and counter move on quiet beta cutoffs
                     if !m.is_capture() && ply < 128 {
                         info.killers[ply][1] = info.killers[ply][0];
                         info.killers[ply][0] = m;
+
+                        // Counter move: record this move as the refutation of opponent's last move
+                        if !prev_move.is_null() {
+                            info.counter_moves[prev_move.piece().index()][prev_move.to_sq() as usize] = m;
+                        }
                     }
 
                     tt.store(board.hash, depth as i8, beta, TTFlag::Beta, best_move);
@@ -558,7 +580,7 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, ti
 
         let mut score;
         loop {
-            score = alpha_beta(board, tt, &mut info, exp, depth, alpha, beta, 0, true);
+            score = alpha_beta(board, tt, &mut info, exp, depth, alpha, beta, 0, true, MOVE_NONE);
 
             if info.stopped {
                 break;
@@ -784,7 +806,7 @@ mod tests {
         let exp_empty = ExpTable::new();
         let mut list = MoveList::new();
         crate::movegen::generate_moves(&board, &mut list);
-        let scores_no_exp = score_moves(&list, &board, &info, 0, tt_move, &exp_empty);
+        let scores_no_exp = score_moves(&list, &board, &info, 0, tt_move, &exp_empty, MOVE_NONE);
 
         // With experience: store a best move for the start position
         let hints_move = list.moves[5]; // pick an arbitrary legal move
@@ -797,7 +819,7 @@ mod tests {
             game_result: 0.8,
             count: 1,
         });
-        let scores_with_exp = score_moves(&list, &board, &info, 0, tt_move, &exp_filled);
+        let scores_with_exp = score_moves(&list, &board, &info, 0, tt_move, &exp_filled, MOVE_NONE);
 
         // The experience move should now be scored at 5_000_000
         let idx = (0..list.len()).find(|&i| list.moves[i].0 == hints_move.0).unwrap();
