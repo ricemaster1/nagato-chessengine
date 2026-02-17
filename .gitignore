@@ -16,8 +16,9 @@ Thumbs.db
 cutechess/
 assets/
 
-# Tablebase files (too large for git)
+# Tablebase files and pgn (too large for git)
 *.rtbw
 *.rtbz
 *.rtbm
+*.pgn
 
