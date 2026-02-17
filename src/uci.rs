@@ -4,10 +4,12 @@
 use crate::bitboard::*;
 use crate::board::Board;
 use crate::eval;
+use crate::learn::{self, ExpTable, GameRecorder};
 use crate::movegen;
 use crate::moves::*;
 use crate::search::{self, TranspositionTable};
 use std::io::{self, BufRead};
+use std::path::PathBuf;
 
 const ENGINE_NAME: &str = "Nagato";
 const ENGINE_AUTHOR: &str = "Nagato Team";
@@ -16,6 +18,18 @@ pub fn uci_loop() {
     let stdin = io::stdin();
     let mut board = Board::start_pos();
     let mut tt = TranspositionTable::new(64); // 64 MB default
+
+    // Experience-based learning
+    let mut exp_path = PathBuf::from("nagato.exp");
+    let mut exp_table = ExpTable::new();
+    let mut recorder = GameRecorder::new();
+
+    // Load experience from previous sessions
+    match exp_table.load(&exp_path) {
+        Ok(n) if n > 0 => eprintln!("info string loaded {} experience entries", n),
+        Ok(_) => {}
+        Err(e) => eprintln!("info string could not load experience: {}", e),
+    }
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -37,24 +51,67 @@ pub fn uci_loop() {
                 println!("id name {}", ENGINE_NAME);
                 println!("id author {}", ENGINE_AUTHOR);
                 println!("option name Hash type spin default 64 min 1 max 4096");
+                println!("option name ExperienceFile type string default nagato.exp");
+                println!("option name Experience type check default true");
                 println!("uciok");
             }
             "isready" => {
                 println!("readyok");
             }
             "ucinewgame" => {
+                // Save any experience from the previous game before resetting
+                if recorder.recorded_count() > 0 {
+                    // If we don't know the result, treat it as a draw
+                    recorder.flush(&mut exp_table, learn::GameResult::Draw);
+                    if let Err(e) = exp_table.save(&exp_path) {
+                        eprintln!("info string could not save experience: {}", e);
+                    }
+                }
                 board = Board::start_pos();
                 tt.clear();
+                recorder.clear();
             }
             "position" => {
                 parse_position(&tokens, &mut board);
             }
             "go" => {
                 let (time_ms, depth) = parse_go(&tokens, &board);
+                recorder.set_our_color(board.side.index() as u8);
                 let result = search::search(&mut board, &mut tt, time_ms, depth);
+                // Record position for experience learning
+                recorder.record(
+                    board.hash,
+                    result.best_move,
+                    result.depth as i8,
+                    result.score.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                    board.side.index() as u8,
+                );
                 println!("bestmove {}", result.best_move);
             }
+            "gameover" => {
+                // Non-standard but supported: "gameover win", "gameover loss", "gameover draw"
+                let result = if tokens.len() >= 2 {
+                    match tokens[1] {
+                        "win" => learn::GameResult::Win,
+                        "loss" => learn::GameResult::Loss,
+                        _ => learn::GameResult::Draw,
+                    }
+                } else {
+                    learn::GameResult::Draw
+                };
+                recorder.flush(&mut exp_table, result);
+                if let Err(e) = exp_table.save(&exp_path) {
+                    eprintln!("info string could not save experience: {}", e);
+                } else {
+                    eprintln!("info string experience saved ({} entries)", exp_table.len());
+                }
+            }
             "quit" => {
+                // Flush any remaining experience before exiting
+                if recorder.recorded_count() > 0 {
+                    recorder.flush(&mut exp_table, learn::GameResult::Draw);
+                    let _ = exp_table.save(&exp_path);
+                }
                 break;
             }
             "d" | "display" => {
@@ -81,10 +138,59 @@ pub fn uci_loop() {
             "bench" => {
                 run_bench(&mut tt);
             }
+            "setoption" => {
+                parse_setoption(&tokens, &mut tt, &mut exp_path, &mut exp_table);
+            }
             _ => {
                 // Unknown command, ignore silently per UCI spec
             }
         }
+    }
+}
+
+fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable, exp_path: &mut PathBuf, exp_table: &mut ExpTable) {
+    // Format: setoption name <name> [value <value>]
+    let mut name = String::new();
+    let mut value = String::new();
+    let mut reading_name = false;
+    let mut reading_value = false;
+
+    for &token in &tokens[1..] {
+        match token {
+            "name" => { reading_name = true; reading_value = false; }
+            "value" => { reading_name = false; reading_value = true; }
+            _ => {
+                if reading_name {
+                    if !name.is_empty() { name.push(' '); }
+                    name.push_str(token);
+                } else if reading_value {
+                    if !value.is_empty() { value.push(' '); }
+                    value.push_str(token);
+                }
+            }
+        }
+    }
+
+    let name_lower = name.to_lowercase();
+    match name_lower.as_str() {
+        "hash" => {
+            if let Ok(mb) = value.parse::<usize>() {
+                *tt = TranspositionTable::new(mb.clamp(1, 4096));
+            }
+        }
+        "experiencefile" => {
+            if !value.is_empty() {
+                *exp_path = PathBuf::from(&value);
+                // Reload experience from the new path
+                *exp_table = ExpTable::new();
+                match exp_table.load(exp_path) {
+                    Ok(n) if n > 0 => eprintln!("info string loaded {} experience entries from {}", n, value),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("info string could not load experience: {}", e),
+                }
+            }
+        }
+        _ => {}
     }
 }
 
