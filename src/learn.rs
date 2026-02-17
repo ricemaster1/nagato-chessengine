@@ -11,6 +11,18 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 // ============================================================
+// Game result (from engine's perspective)
+// ============================================================
+
+/// Outcome of a finished game, from the engine's perspective.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GameResult {
+    Win,
+    Draw,
+    Loss,
+}
+
+// ============================================================
 // Experience entry
 // ============================================================
 
@@ -208,5 +220,115 @@ impl ExpTable {
         }
 
         Ok(loaded)
+    }
+}
+
+// ============================================================
+// Game recorder
+// ============================================================
+
+/// A snapshot of one position during a game.
+/// We don't know the game result yet — that gets filled in at the end.
+#[derive(Clone, Copy)]
+struct PositionRecord {
+    hash: u64,
+    best_move: Move,
+    depth: i8,
+    score: i16,
+    /// Which color was to move (0 = White, 1 = Black)
+    side: u8,
+}
+
+/// Records notable positions as the engine plays a game.
+/// When the game ends, we learn the outcome and flush everything
+/// into the experience table.
+pub struct GameRecorder {
+    positions: Vec<PositionRecord>,
+    /// Which color Nagato is playing (set when the first "go" arrives)
+    our_color: Option<u8>,
+}
+
+impl GameRecorder {
+    pub fn new() -> Self {
+        GameRecorder {
+            positions: Vec::with_capacity(128),
+            our_color: None,
+        }
+    }
+
+    /// Call this when the engine starts thinking.
+    /// `side` is the color to move (0 = White, 1 = Black).
+    pub fn set_our_color(&mut self, side: u8) {
+        if self.our_color.is_none() {
+            self.our_color = Some(side);
+        }
+    }
+
+    /// Record a position after the engine finishes searching it.
+    pub fn record(&mut self, hash: u64, best_move: Move, depth: i8, score: i16, side: u8) {
+        // Only record positions searched to a reasonable depth
+        if depth < 4 {
+            return;
+        }
+        self.positions.push(PositionRecord {
+            hash,
+            best_move,
+            depth,
+            score,
+            side,
+        });
+    }
+
+    /// Flush all recorded positions into the experience table
+    /// now that we know how the game ended.
+    pub fn flush(&mut self, table: &mut ExpTable, result: GameResult) {
+        let our_color = match self.our_color {
+            Some(c) => c,
+            None => {
+                self.positions.clear();
+                return;
+            }
+        };
+
+        for pos in &self.positions {
+            // Game result from the perspective of the side to move in this position
+            let result_for_side = if pos.side == our_color {
+                match result {
+                    GameResult::Win => 1.0f32,
+                    GameResult::Draw => 0.5,
+                    GameResult::Loss => 0.0,
+                }
+            } else {
+                // Opponent was to move — flip the result
+                match result {
+                    GameResult::Win => 0.0f32,
+                    GameResult::Draw => 0.5,
+                    GameResult::Loss => 1.0,
+                }
+            };
+
+            table.store(ExpEntry {
+                hash: pos.hash,
+                best_move: pos.best_move,
+                depth: pos.depth,
+                score: pos.score,
+                game_result: result_for_side,
+                count: 1,
+            });
+        }
+
+        self.positions.clear();
+        self.our_color = None;
+    }
+
+    /// Discard recorded positions without learning (e.g. game aborted).
+    pub fn clear(&mut self) {
+        self.positions.clear();
+        self.our_color = None;
+    }
+
+    /// How many positions have been recorded this game.
+    pub fn recorded_count(&self) -> usize {
+        self.positions.len()
     }
 }
