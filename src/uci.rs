@@ -4,11 +4,12 @@
 use crate::bitboard::*;
 use crate::board::Board;
 use crate::eval;
+use crate::learn::{self, ExpTable, GameRecorder};
 use crate::movegen;
 use crate::moves::*;
 use crate::search::{self, TranspositionTable};
-use crate::tablebase;
 use std::io::{self, BufRead};
+use std::path::PathBuf;
 
 const ENGINE_NAME: &str = "Nagato";
 const ENGINE_AUTHOR: &str = "Nagato Team";
@@ -17,6 +18,18 @@ pub fn uci_loop() {
     let stdin = io::stdin();
     let mut board = Board::start_pos();
     let mut tt = TranspositionTable::new(64); // 64 MB default
+
+    // Experience-based learning
+    let mut exp_path = PathBuf::from("nagato.exp");
+    let mut exp_table = ExpTable::new();
+    let mut recorder = GameRecorder::new();
+
+    // Load experience from previous sessions
+    match exp_table.load(&exp_path) {
+        Ok(n) if n > 0 => eprintln!("info string loaded {} experience entries", n),
+        Ok(_) => {}
+        Err(e) => eprintln!("info string could not load experience: {}", e),
+    }
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -38,50 +51,67 @@ pub fn uci_loop() {
                 println!("id name {}", ENGINE_NAME);
                 println!("id author {}", ENGINE_AUTHOR);
                 println!("option name Hash type spin default 64 min 1 max 4096");
-                println!("option name SyzygyPath type string default <empty>");
-                println!("option name SyzygyProbeDepth type spin default 1 min 0 max 64");
-                println!("option name LomonosovOnline type check default false");
+                println!("option name ExperienceFile type string default nagato.exp");
+                println!("option name Experience type check default true");
                 println!("uciok");
             }
             "isready" => {
                 println!("readyok");
             }
             "ucinewgame" => {
+                // Save any experience from the previous game before resetting
+                if recorder.recorded_count() > 0 {
+                    // If we don't know the result, treat it as a draw
+                    recorder.flush(&mut exp_table, learn::GameResult::Draw);
+                    if let Err(e) = exp_table.save(&exp_path) {
+                        eprintln!("info string could not save experience: {}", e);
+                    }
+                }
                 board = Board::start_pos();
                 tt.clear();
+                recorder.clear();
             }
             "position" => {
                 parse_position(&tokens, &mut board);
             }
             "go" => {
                 let (time_ms, depth) = parse_go(&tokens, &board);
-
-                // Try Syzygy root probe for positions with few pieces
-                let piece_count = board.all_occupancy.count_ones();
-                if tablebase::syzygy_available()
-                    && piece_count <= tablebase::max_pieces()
-                    && board.castling == 0
-                {
-                    if let Some((uci_move, tb_result)) = tablebase::probe_root(&board) {
-                        let wdl_str = match tb_result {
-                            tablebase::TbResult::Win(dtz) => format!("tb win (dtz {})", dtz),
-                            tablebase::TbResult::Draw => "tb draw".to_string(),
-                            tablebase::TbResult::Loss(dtz) => format!("tb loss (dtz {})", dtz),
-                            tablebase::TbResult::Failed => "tb unknown".to_string(),
-                        };
-                        println!("info depth 1 score cp 0 string {}", wdl_str);
-                        println!("bestmove {}", uci_move);
-                        continue;
-                    }
-                }
-
-                let result = search::search(&mut board, &mut tt, time_ms, depth);
+                recorder.set_our_color(board.side.index() as u8);
+                let result = search::search(&mut board, &mut tt, &exp_table, time_ms, depth);
+                // Record position for experience learning
+                recorder.record(
+                    board.hash,
+                    result.best_move,
+                    result.depth as i8,
+                    result.score.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                    board.side.index() as u8,
+                );
                 println!("bestmove {}", result.best_move);
             }
-            "setoption" => {
-                parse_setoption(&tokens, &mut tt);
+            "gameover" => {
+                // Non-standard but supported: "gameover win", "gameover loss", "gameover draw"
+                let result = if tokens.len() >= 2 {
+                    match tokens[1] {
+                        "win" => learn::GameResult::Win,
+                        "loss" => learn::GameResult::Loss,
+                        _ => learn::GameResult::Draw,
+                    }
+                } else {
+                    learn::GameResult::Draw
+                };
+                recorder.flush(&mut exp_table, result);
+                if let Err(e) = exp_table.save(&exp_path) {
+                    eprintln!("info string could not save experience: {}", e);
+                } else {
+                    eprintln!("info string experience saved ({} entries)", exp_table.len());
+                }
             }
             "quit" => {
+                // Flush any remaining experience before exiting
+                if recorder.recorded_count() > 0 {
+                    recorder.flush(&mut exp_table, learn::GameResult::Draw);
+                    let _ = exp_table.save(&exp_path);
+                }
                 break;
             }
             "d" | "display" => {
@@ -108,16 +138,8 @@ pub fn uci_loop() {
             "bench" => {
                 run_bench(&mut tt);
             }
-            "tbprobe" => {
-                let wdl = tablebase::probe_wdl(&board);
-                let dtz = tablebase::probe_dtz(&board);
-                println!("WDL: {:?}", wdl);
-                println!("DTZ: {:?}", dtz);
-                if tablebase::syzygy_available() {
-                    println!("Syzygy: available, max {} pieces", tablebase::max_pieces());
-                } else {
-                    println!("Syzygy: not loaded");
-                }
+            "setoption" => {
+                parse_setoption(&tokens, &mut tt, &mut exp_path, &mut exp_table);
             }
             _ => {
                 // Unknown command, ignore silently per UCI spec
@@ -126,7 +148,7 @@ pub fn uci_loop() {
     }
 }
 
-fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable) {
+fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable, exp_path: &mut PathBuf, exp_table: &mut ExpTable) {
     // Format: setoption name <name> [value <value>]
     let mut name = String::new();
     let mut value = String::new();
@@ -135,24 +157,14 @@ fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable) {
 
     for &token in &tokens[1..] {
         match token {
-            "name" => {
-                reading_name = true;
-                reading_value = false;
-            }
-            "value" => {
-                reading_name = false;
-                reading_value = true;
-            }
+            "name" => { reading_name = true; reading_value = false; }
+            "value" => { reading_name = false; reading_value = true; }
             _ => {
                 if reading_name {
-                    if !name.is_empty() {
-                        name.push(' ');
-                    }
+                    if !name.is_empty() { name.push(' '); }
                     name.push_str(token);
                 } else if reading_value {
-                    if !value.is_empty() {
-                        value.push(' ');
-                    }
+                    if !value.is_empty() { value.push(' '); }
                     value.push_str(token);
                 }
             }
@@ -166,16 +178,17 @@ fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable) {
                 *tt = TranspositionTable::new(mb.clamp(1, 4096));
             }
         }
-        "syzygypath" => {
-            if !value.is_empty() && value != "<empty>" {
-                tablebase::init_syzygy(&value);
+        "experiencefile" => {
+            if !value.is_empty() {
+                *exp_path = PathBuf::from(&value);
+                // Reload experience from the new path
+                *exp_table = ExpTable::new();
+                match exp_table.load(exp_path) {
+                    Ok(n) if n > 0 => eprintln!("info string loaded {} experience entries from {}", n, value),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("info string could not load experience: {}", e),
+                }
             }
-        }
-        "syzygyprobelimit" | "syzygyprovedepth" => {
-            // Stored for future use — probe depth threshold
-        }
-        "lomonosovooline" => {
-            // Toggle — stored as a flag (currently always available via tbprobe command)
         }
         _ => {}
     }
@@ -414,7 +427,8 @@ fn run_bench(tt: &mut TranspositionTable) {
     for fen in &positions {
         let mut board = Board::from_fen(fen).unwrap();
         tt.clear();
-        let result = search::search(&mut board, tt, 0, depth);
+        let exp = learn::ExpTable::new();
+        let result = search::search(&mut board, tt, &exp, 0, depth);
         total_nodes += result.nodes;
     }
 

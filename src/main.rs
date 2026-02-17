@@ -6,7 +6,7 @@ mod zobrist;
 mod uci;
 mod search;
 mod eval;
-mod tablebase;
+mod learn;
 
 fn main() {
     zobrist::init();

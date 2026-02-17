@@ -3,9 +3,9 @@
 use crate::bitboard::*;
 use crate::board::Board;
 use crate::eval::{self, INFINITY, MATE_SCORE};
+use crate::learn::{ExpEntry, ExpTable};
 use crate::movegen;
 use crate::moves::*;
-use crate::tablebase;
 use std::time::Instant;
 
 // ============================================================
@@ -123,43 +123,27 @@ impl SearchInfo {
 }
 
 // ============================================================
-// Edge pawn escape detection
-// ============================================================
-
-/// Returns true if this move is a pawn capturing from the A/H file to the B/G file.
-/// These captures are structurally significant: the pawn gains two-directional
-/// capture coverage after escaping the edge.
-#[inline]
-fn is_edge_pawn_escape(m: Move) -> bool {
-    if m.piece() != Piece::Pawn || (!m.is_capture() && !m.is_en_passant()) {
-        return false;
-    }
-    let from_file = m.from_sq() % 8;
-    let to_file = m.to_sq() % 8;
-    (from_file == 0 && to_file == 1) || (from_file == 7 && to_file == 6)
-}
-
 // ============================================================
 // Move ordering
 // ============================================================
 
-fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt_move: Move) -> Vec<i32> {
+fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt_move: Move, exp: &ExpTable) -> Vec<i32> {
+    // Probe experience once per position
+    let exp_move = exp.probe(board.hash).map(|e| e.best_move);
+
     let mut scores = vec![0i32; list.len()];
     for i in 0..list.len() {
         let m = list.moves[i];
 
         if m.0 == tt_move.0 && !tt_move.is_null() {
             scores[i] = 10_000_000; // TT move first
+        } else if exp_move.is_some() && m.0 == exp_move.unwrap().0 && !exp_move.unwrap().is_null() {
+            scores[i] = 5_000_000; // Experience best move — between TT and captures
         } else if m.is_capture() || m.is_en_passant() {
             let see_val = eval::see(board, m);
             if see_val >= 0 {
                 // Winning/equal captures: above killers, ordered by MVV-LVA
-                let mut cap_score = 1_000_000 + eval::mvv_lva_score(m);
-                // Edge pawn escape bonus: prioritize captures that unlock
-                // pawn coverage by moving off the A/H file
-                if is_edge_pawn_escape(m) {
-                    cap_score += 15_000;
-                }
+                let cap_score = 1_000_000 + eval::mvv_lva_score(m);
                 scores[i] = cap_score;
             } else {
                 // Losing captures: below killers and history, ordered by SEE
@@ -199,7 +183,7 @@ fn pick_move(list: &mut MoveList, scores: &mut [i32], start: usize) {
 // Quiescence search
 // ============================================================
 
-fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInfo) -> i32 {
+fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInfo, _exp: &ExpTable) -> i32 {
     info.nodes += 1;
     info.check_time();
     if info.stopped {
@@ -243,7 +227,7 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInf
             continue;
         }
 
-        let score = -quiescence(board, -beta, -alpha, info);
+        let score = -quiescence(board, -beta, -alpha, info, _exp);
         board.unmake_move(m);
 
         if info.stopped {
@@ -269,6 +253,7 @@ fn alpha_beta(
     board: &mut Board,
     tt: &mut TranspositionTable,
     info: &mut SearchInfo,
+    exp: &ExpTable,
     mut depth: i32,
     mut alpha: i32,
     beta: i32,
@@ -283,7 +268,7 @@ fn alpha_beta(
 
     // Drop into quiescence at depth 0
     if depth <= 0 {
-        return quiescence(board, alpha, beta, info);
+        return quiescence(board, alpha, beta, info, exp);
     }
 
     info.nodes += 1;
@@ -312,18 +297,6 @@ fn alpha_beta(
                 if reps >= 1 {
                     return 0; // Draw by repetition
                 }
-            }
-        }
-    }
-
-    // Tablebase probe in search (only for positions with few pieces, no castling)
-    if ply > 0 {
-        let piece_count = board.all_occupancy.count_ones();
-        if piece_count <= tablebase::max_pieces() && board.castling == 0 {
-            let tb_result = tablebase::probe_wdl(board);
-            if let Some(tb_score) = tb_result.to_score(ply) {
-                info.nodes += 1;
-                return tb_score;
             }
         }
     }
@@ -359,6 +332,21 @@ fn alpha_beta(
         }
     }
 
+    // Experience probe — compute a small eval correction if we've been here before
+    let exp_correction = if let Some(exp_entry) = exp.probe(board.hash) {
+        // Use experience best move as fallback if TT has nothing
+        if tt_move.is_null() && !exp_entry.best_move.is_null() {
+            tt_move = exp_entry.best_move;
+        }
+        // Correction: game_result is 0.0 (loss) to 1.0 (win), expected is 0.5.
+        // Nudge eval toward reality. Scale by confidence (more games = stronger).
+        let confidence = (exp_entry.count as f32).min(16.0) / 16.0; // caps at 16 games
+        let outcome_delta = exp_entry.game_result - 0.5; // -0.5 to +0.5
+        (outcome_delta * 60.0 * confidence) as i32 // max ±30cp
+    } else {
+        0
+    };
+
     // Null move pruning
     if do_null && !in_check && depth >= 3 && ply > 0 {
         // Don't do null move if we only have pawns + king (zugzwang risk)
@@ -368,7 +356,7 @@ fn alpha_beta(
         if non_pawn_material != 0 {
             board.make_null_move();
             let r = if depth >= 6 { 3 } else { 2 }; // Adaptive null move reduction
-            let null_score = -alpha_beta(board, tt, info, depth - 1 - r, -beta, -beta + 1, ply + 1, false);
+            let null_score = -alpha_beta(board, tt, info, exp, depth - 1 - r, -beta, -beta + 1, ply + 1, false);
             board.unmake_null_move();
 
             if info.stopped {
@@ -383,7 +371,7 @@ fn alpha_beta(
 
     // Reverse futility pruning (static eval pruning)
     if !in_check && depth <= 3 && ply > 0 {
-        let static_eval = eval::evaluate(board);
+        let static_eval = eval::evaluate(board) + exp_correction;
         let margin = 120 * depth;
         if static_eval - margin >= beta {
             return static_eval - margin;
@@ -394,7 +382,7 @@ fn alpha_beta(
     let mut list = MoveList::new();
     movegen::generate_moves(board, &mut list);
 
-    let mut scores = score_moves(&list, board, info, ply, tt_move);
+    let mut scores = score_moves(&list, board, info, ply, tt_move, exp);
 
     let mut best_move = MOVE_NONE;
     let mut best_score = -INFINITY;
@@ -408,10 +396,6 @@ fn alpha_beta(
         if !board.make_move(m) {
             continue;
         }
-
-        // Edge pawn escape extension: search one ply deeper when a pawn
-        // captures off the A/H file to B/G, gaining full coverage.
-        let edge_ext = if !in_check && is_edge_pawn_escape(m) { 1 } else { 0 };
 
         let mut score;
 
@@ -437,15 +421,15 @@ fn alpha_beta(
             }
 
             let reduced_depth = (depth - 1 - reduction).max(1);
-            score = -alpha_beta(board, tt, info, reduced_depth, -alpha - 1, -alpha, ply + 1, true);
+            score = -alpha_beta(board, tt, info, exp, reduced_depth, -alpha - 1, -alpha, ply + 1, true);
 
             // Re-search at full depth if LMR score is above alpha
             if score > alpha {
-                score = -alpha_beta(board, tt, info, depth - 1, -alpha - 1, -alpha, ply + 1, true);
+                score = -alpha_beta(board, tt, info, exp, depth - 1, -alpha - 1, -alpha, ply + 1, true);
             }
         } else if moves_searched > 0 {
             // PVS: search with null window first
-            score = -alpha_beta(board, tt, info, depth - 1 + edge_ext, -alpha - 1, -alpha, ply + 1, true);
+            score = -alpha_beta(board, tt, info, exp, depth - 1, -alpha - 1, -alpha, ply + 1, true);
         } else {
             // First move: full window search
             score = alpha + 1; // Force full search below
@@ -453,7 +437,7 @@ fn alpha_beta(
 
         // Full window re-search if needed
         if score > alpha {
-            score = -alpha_beta(board, tt, info, depth - 1 + edge_ext, -beta, -alpha, ply + 1, true);
+            score = -alpha_beta(board, tt, info, exp, depth - 1, -beta, -alpha, ply + 1, true);
         }
 
         board.unmake_move(m);
@@ -515,7 +499,7 @@ pub struct SearchResult {
     pub time_ms: u64,
 }
 
-pub fn search(board: &mut Board, tt: &mut TranspositionTable, time_limit_ms: u64, max_depth: i32) -> SearchResult {
+pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, time_limit_ms: u64, max_depth: i32) -> SearchResult {
     let mut info = SearchInfo::new();
     let start_time = Instant::now();
     info.start_time = start_time;
@@ -540,7 +524,7 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, time_limit_ms: u64
 
         let mut score;
         loop {
-            score = alpha_beta(board, tt, &mut info, depth, alpha, beta, 0, true);
+            score = alpha_beta(board, tt, &mut info, exp, depth, alpha, beta, 0, true);
 
             if info.stopped {
                 break;
@@ -683,7 +667,8 @@ mod tests {
         setup();
         let mut board = Board::start_pos();
         let mut tt = TranspositionTable::new(16);
-        let result = search(&mut board, &mut tt, 1000, 5);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 1000, 5);
         assert!(!result.best_move.is_null());
         println!("Best move: {}, score: {}", result.best_move, result.score);
     }
@@ -694,7 +679,8 @@ mod tests {
         // White to move, Qh7# is mate in 1
         let mut board = Board::from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4").unwrap();
         let mut tt = TranspositionTable::new(16);
-        let result = search(&mut board, &mut tt, 5000, 6);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 5000, 6);
         // Should find Qxf7# (scholar's mate)
         println!("Best move: {}, score: {}", result.best_move, result.score);
         assert!(eval::is_mate_score(result.score), "Should find mate");
@@ -706,7 +692,8 @@ mod tests {
         // Position where queen is hanging
         let mut board = Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1").unwrap();
         let mut tt = TranspositionTable::new(16);
-        let result = search(&mut board, &mut tt, 1000, 5);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 1000, 5);
         assert!(!result.best_move.is_null());
     }
 
@@ -716,7 +703,8 @@ mod tests {
         // Back-rank mate in 2: 1. Re8+ Rxe8 2. Qxe8#
         let mut board = Board::from_fen("3r2k1/5ppp/8/8/8/8/4RPPP/4Q1K1 w - - 0 1").unwrap();
         let mut tt = TranspositionTable::new(16);
-        let result = search(&mut board, &mut tt, 10000, 10);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 10000, 10);
         println!("Mate-in-2: Best move: {}, score: {}", result.best_move, result.score);
         assert!(eval::is_mate_score(result.score), "Should find mate in 2");
         let mate_moves = eval::mate_in(result.score);
@@ -729,7 +717,8 @@ mod tests {
         // KQ vs K: forced mate in 6
         let mut board = Board::from_fen("8/4k3/8/8/2K5/8/8/Q7 w - - 0 1").unwrap();
         let mut tt = TranspositionTable::new(32);
-        let result = search(&mut board, &mut tt, 30000, 16);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 30000, 16);
         println!("Mate-in-6: Best move: {}, score: {}", result.best_move, result.score);
         assert!(eval::is_mate_score(result.score), "Should find mate in 6");
         let mate_moves = eval::mate_in(result.score);
@@ -742,87 +731,92 @@ mod tests {
         // KQ vs K: forced mate in 7 — verifies deep mate-finding capability
         let mut board = Board::from_fen("8/8/3k4/8/8/4K3/8/Q7 w - - 0 1").unwrap();
         let mut tt = TranspositionTable::new(32);
-        let result = search(&mut board, &mut tt, 30000, 20);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 30000, 20);
         println!("Mate-in-7: Best move: {}, score: {}", result.best_move, result.score);
         assert!(eval::is_mate_score(result.score), "Should find mate in 7");
         let mate_moves = eval::mate_in(result.score);
         assert!(mate_moves <= 7, "Should be mate in at most 7, got mate in {}", mate_moves);
     }
 
-    // ---- Edge pawn escape tests ----
-
     #[test]
-    fn test_is_edge_pawn_escape_a_to_b() {
-        // Pawn on a2 capturing to b3 (from sq 8, to sq 17)
-        let m = Move::new_with_capture(8, 17, FLAG_CAPTURE, Piece::Pawn, Piece::Pawn);
-        assert!(is_edge_pawn_escape(m));
-    }
-
-    #[test]
-    fn test_is_edge_pawn_escape_h_to_g() {
-        // Pawn on h4 capturing to g5 (from sq 31, to sq 38)
-        let m = Move::new_with_capture(31, 38, FLAG_CAPTURE, Piece::Pawn, Piece::Knight);
-        assert!(is_edge_pawn_escape(m));
-    }
-
-    #[test]
-    fn test_is_not_edge_escape_interior_pawn() {
-        // Pawn on d4 capturing to e5 — not an edge escape
-        let m = Move::new_with_capture(27, 36, FLAG_CAPTURE, Piece::Pawn, Piece::Pawn);
-        assert!(!is_edge_pawn_escape(m));
-    }
-
-    #[test]
-    fn test_is_not_edge_escape_quiet_move() {
-        // Pawn on a2 pushing to a3 — not a capture, not an escape
-        let m = Move::new(8, 16, 0, Piece::Pawn);
-        assert!(!is_edge_pawn_escape(m));
-    }
-
-    #[test]
-    fn test_edge_escape_ordering_boost() {
+    fn test_experience_move_ordering() {
         setup();
-        // White pawn on a5, Black pawn on b6 — AxB is an edge escape capture
-        // Compare move score vs. a similar non-edge capture
-        let mut board = Board::from_fen("8/8/1p1p4/P1P5/8/8/8/4K2k w - - 0 1").unwrap();
-        let mut list = MoveList::new();
-        movegen::generate_moves(&mut board, &mut list);
-
+        let mut board = Board::start_pos();
         let info = SearchInfo::new();
-        let scores = score_moves(&list, &board, &info, 0, MOVE_NONE);
+        let tt_move = MOVE_NONE;
 
-        // Find scores for the two captures
-        let mut edge_score = None;
-        let mut interior_score = None;
-        for i in 0..list.len() {
-            let m = list.moves[i];
-            if m.is_capture() && m.piece() == Piece::Pawn {
-                let from_file = m.from_sq() % 8;
-                if from_file == 0 {
-                    edge_score = Some(scores[i]);
-                } else {
-                    interior_score = Some(scores[i]);
-                }
-            }
-        }
+        // Without experience: all quiet moves scored by history (0 initially)
+        let exp_empty = ExpTable::new();
+        let mut list = MoveList::new();
+        crate::movegen::generate_moves(&board, &mut list);
+        let scores_no_exp = score_moves(&list, &board, &info, 0, tt_move, &exp_empty);
 
-        if let (Some(e), Some(i)) = (edge_score, interior_score) {
-            assert!(e > i, "Edge pawn escape ({}) should outscore interior capture ({})", e, i);
-        }
+        // With experience: store a best move for the start position
+        let hints_move = list.moves[5]; // pick an arbitrary legal move
+        let mut exp_filled = ExpTable::new();
+        exp_filled.store(ExpEntry {
+            hash: board.hash,
+            best_move: hints_move,
+            depth: 10,
+            score: 50,
+            game_result: 0.8,
+            count: 1,
+        });
+        let scores_with_exp = score_moves(&list, &board, &info, 0, tt_move, &exp_filled);
+
+        // The experience move should now be scored at 5_000_000
+        let idx = (0..list.len()).find(|&i| list.moves[i].0 == hints_move.0).unwrap();
+        assert_eq!(scores_no_exp[idx], 0, "Without experience, should be 0 (history)");
+        assert_eq!(scores_with_exp[idx], 5_000_000, "With experience, should be 5M");
     }
 
     #[test]
-    fn test_edge_pawn_escape_finds_capture() {
+    fn test_experience_eval_correction() {
         setup();
-        // Position where capturing off the edge is clearly the best pawn move
-        // White pawn on a6, Black rook on b7, White king e1, Black king h8
-        let mut board = Board::from_fen("7k/1r6/P7/8/8/8/8/4K3 w - - 0 1").unwrap();
+        // Verify that experience with a strong win record produces a positive correction
+        // and experience with losses produces a negative one. We check indirectly:
+        // searching the same position with "all wins" vs "all losses" experience
+        // should yield a higher score for the winning experience.
+        let mut board = Board::start_pos();
         let mut tt = TranspositionTable::new(16);
-        let result = search(&mut board, &mut tt, 2000, 8);
-        // The engine should find axb7 — winning a rook and escaping the edge
-        let best = result.best_move;
-        assert!(best.is_capture(), "Should capture the rook");
-        assert_eq!(best.from_sq() % 8, 0, "Should be from A-file");
-        assert_eq!(best.to_sq() % 8, 1, "Should capture to B-file");
+
+        // Search without experience
+        let exp_empty = ExpTable::new();
+        let result_neutral = search(&mut board, &mut tt, &exp_empty, 500, 4);
+
+        // Search with "winning" experience
+        tt.clear();
+        let mut exp_win = ExpTable::new();
+        exp_win.store(ExpEntry {
+            hash: board.hash,
+            best_move: result_neutral.best_move,
+            depth: 10,
+            score: 50,
+            game_result: 1.0, // always won from here
+            count: 16,
+        });
+        let result_win = search(&mut board, &mut tt, &exp_win, 500, 4);
+
+        // Search with "losing" experience
+        tt.clear();
+        let mut exp_loss = ExpTable::new();
+        exp_loss.store(ExpEntry {
+            hash: board.hash,
+            best_move: result_neutral.best_move,
+            depth: 10,
+            score: 50,
+            game_result: 0.0, // always lost from here
+            count: 16,
+        });
+        let result_loss = search(&mut board, &mut tt, &exp_loss, 500, 4);
+
+        // The "win" experience should produce a score >= "loss" experience
+        println!("Neutral: {}, Win: {}, Loss: {}", result_neutral.score, result_win.score, result_loss.score);
+        // Note: the correction is small (max ±30cp) and only affects RFP, so
+        // the effect may be subtle. We just verify it doesn't crash and produces
+        // reasonable scores (all should be near 0 for start pos).
+        assert!(result_win.score > -500 && result_win.score < 500, "Score should be reasonable");
+        assert!(result_loss.score > -500 && result_loss.score < 500, "Score should be reasonable");
     }
 }
