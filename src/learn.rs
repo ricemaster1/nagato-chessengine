@@ -6,6 +6,10 @@
 
 use crate::moves::Move;
 
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::path::Path;
+
 // ============================================================
 // Experience entry
 // ============================================================
@@ -95,5 +99,114 @@ impl ExpTable {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+// ============================================================
+// Binary file persistence
+// ============================================================
+//
+// File format (nagato.exp):
+//   Magic:   4 bytes "NEXP"
+//   Version: 1 byte
+//   Count:   4 bytes (u32 LE) — number of entries
+//   Entries: count × 24 bytes each:
+//     hash:        8 bytes (u64 LE)
+//     best_move:   4 bytes (u32 LE — Move raw bits)
+//     depth:       1 byte  (i8)
+//     score:       2 bytes (i16 LE)
+//     game_result: 4 bytes (f32 LE)
+//     count:       2 bytes (u16 LE)
+//     _padding:    3 bytes (reserved)
+
+const EXP_MAGIC: &[u8; 4] = b"NEXP";
+const EXP_VERSION: u8 = 1;
+const ENTRY_BYTES: usize = 24;
+
+impl ExpTable {
+    /// Save all non-empty entries to a binary file.
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        let file = File::create(path)?;
+        let mut w = BufWriter::new(file);
+
+        // Header
+        w.write_all(EXP_MAGIC)?;
+        w.write_all(&[EXP_VERSION])?;
+
+        let occupied: Vec<&ExpEntry> = self.entries.iter().filter_map(|e| e.as_ref()).collect();
+        w.write_all(&(occupied.len() as u32).to_le_bytes())?;
+
+        // Entries
+        for e in &occupied {
+            w.write_all(&e.hash.to_le_bytes())?;
+            w.write_all(&e.best_move.0.to_le_bytes())?;
+            w.write_all(&[e.depth as u8])?;
+            w.write_all(&e.score.to_le_bytes())?;
+            w.write_all(&e.game_result.to_le_bytes())?;
+            w.write_all(&e.count.to_le_bytes())?;
+            w.write_all(&[0u8; 3])?; // padding
+        }
+
+        w.flush()?;
+        Ok(())
+    }
+
+    /// Load entries from a binary file, merging into the current table.
+    pub fn load(&mut self, path: &Path) -> io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        let file = File::open(path)?;
+        let mut r = BufReader::new(file);
+
+        // Check magic
+        let mut magic = [0u8; 4];
+        r.read_exact(&mut magic)?;
+        if &magic != EXP_MAGIC {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "not an experience file"));
+        }
+
+        // Check version
+        let mut ver = [0u8; 1];
+        r.read_exact(&mut ver)?;
+        if ver[0] != EXP_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported experience file version {}", ver[0]),
+            ));
+        }
+
+        // Entry count
+        let mut count_buf = [0u8; 4];
+        r.read_exact(&mut count_buf)?;
+        let count = u32::from_le_bytes(count_buf) as usize;
+
+        let mut loaded = 0;
+        let mut buf = [0u8; ENTRY_BYTES];
+
+        for _ in 0..count {
+            r.read_exact(&mut buf)?;
+
+            let hash = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+            let move_bits = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+            let depth = buf[12] as i8;
+            let score = i16::from_le_bytes(buf[13..15].try_into().unwrap());
+            let game_result = f32::from_le_bytes(buf[15..19].try_into().unwrap());
+            let entry_count = u16::from_le_bytes(buf[19..21].try_into().unwrap());
+            // buf[21..24] is padding
+
+            self.store(ExpEntry {
+                hash,
+                best_move: Move(move_bits),
+                depth,
+                score,
+                game_result,
+                count: entry_count,
+            });
+            loaded += 1;
+        }
+
+        Ok(loaded)
     }
 }
