@@ -368,32 +368,31 @@ pub fn see(board: &Board, m: Move) -> i32 {
     let from = m.from_sq();
     let to = m.to_sq();
 
-    // Determine the initial captured piece value
     let mut gain = [0i32; 32];
-    let mut depth: usize = 0;
+    let mut d: usize = 0;
 
+    // Initial capture gain
     gain[0] = if m.is_en_passant() {
         PAWN_VALUE
     } else {
         PIECE_VALUES[m.captured_piece().index()]
     };
 
-    // The value of the piece making the initial capture (what the opponent can win back)
-    let mut attacker_value = if m.is_promotion() {
-        // If promoting, the piece that lands on the square is the promoted piece
+    // If promoting, add the promotion bonus
+    if m.is_promotion() {
+        gain[0] += PIECE_VALUES[m.promotion_piece().unwrap().index()] - PAWN_VALUE;
+    }
+
+    // The value of the piece now sitting on the target square (what the opponent can win back)
+    let mut piece_on_target = if m.is_promotion() {
         PIECE_VALUES[m.promotion_piece().unwrap().index()]
     } else {
         PIECE_VALUES[m.piece().index()]
     };
 
-    // If promoting, we also gain the promotion bonus (promoted - pawn)
-    if m.is_promotion() {
-        gain[0] += PIECE_VALUES[m.promotion_piece().unwrap().index()] - PAWN_VALUE;
-    }
-
     // Working copy of occupancy — remove the initial attacker
     let mut occ = board.all_occupancy;
-    occ &= !square_bb(from); // Remove attacker from occupancy
+    occ ^= square_bb(from);
 
     // For en passant, also remove the captured pawn from occupancy
     if m.is_en_passant() {
@@ -401,59 +400,52 @@ pub fn see(board: &Board, m: Move) -> i32 {
             Color::White => to - 8,
             Color::Black => to + 8,
         };
-        occ &= !square_bb(ep_cap_sq);
+        occ ^= square_bb(ep_cap_sq);
     }
 
     // Side making the *next* capture (opponent of the initial mover)
     let mut side = board.side.flip();
 
     loop {
-        depth += 1;
-        if depth >= 32 {
-            break;
-        }
-
-        // gain[d] = what we capture - what we stand to lose
-        // "what we stand to lose" is the attacker value from the previous ply
-        gain[depth] = attacker_value - gain[depth - 1];
-
-        // Pruning: if even the best case (standing pat) can't improve,
-        // the side to move at this depth would never make this capture.
-        // This is the "stand pat" optimization for SEE.
-        if (-gain[depth - 1]).max(gain[depth]) < 0 {
+        d += 1;
+        if d >= 32 {
             break;
         }
 
         // Find the least valuable attacker of `to` by `side`
         let (attacker_sq, piece) = match least_valuable_attacker(board, to, side, occ) {
             Some(result) => result,
-            None => break, // No more attackers — sequence ends
+            None => break, // No more attackers — exchange ends
         };
 
-        // Update attacker value for the next iteration
-        attacker_value = PIECE_VALUES[piece.index()];
+        // Speculative gain: if we capture the piece on the target, we get piece_on_target
+        // but we give up what our opponent gained so far
+        gain[d] = piece_on_target - gain[d - 1];
 
-        // Remove this attacker from occupancy (it's now on `to`)
-        occ &= !square_bb(attacker_sq);
+        // Pruning: if even the best case can't improve for the side to move,
+        // this capture would never be made
+        if (-gain[d - 1]).max(gain[d]) < 0 {
+            break;
+        }
 
-        // If the attacker was a pawn or bishop or queen moving diagonally, or
-        // a rook or queen moving in a straight line, there may be an x-ray
-        // attacker behind it. By removing the piece from `occ`, the sliding
-        // piece attack lookups in `least_valuable_attacker` will naturally
-        // discover the x-ray attacker on the next iteration.
+        // The piece now on the target square is the one that just captured
+        piece_on_target = PIECE_VALUES[piece.index()];
+
+        // Remove this attacker from occupancy (opens x-ray lines for sliding pieces)
+        occ ^= square_bb(attacker_sq);
 
         // Flip side
         side = side.flip();
     }
 
-    // Propagate the gain stack back: each side chooses the option that
-    // minimizes the opponent's gain (negamax-style).
-    while depth > 1 {
-        depth -= 1;
-        gain[depth] = -((-gain[depth]).max(gain[depth + 1]));
+    // Propagate the gain stack back: each side chooses whether to capture
+    // or stand pat, whichever is better (negamax-style)
+    while d > 1 {
+        d -= 1;
+        gain[d - 1] = -((-gain[d - 1]).max(gain[d]));
     }
 
-    gain[1].max(-gain[0])
+    gain[0]
 }
 
 /// Find the least valuable piece of `side` that attacks `sq` given `occ`.
