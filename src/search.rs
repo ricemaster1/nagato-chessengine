@@ -3,6 +3,7 @@
 use crate::bitboard::*;
 use crate::board::Board;
 use crate::eval::{self, INFINITY, MATE_SCORE};
+use crate::learn::ExpTable;
 use crate::movegen;
 use crate::moves::*;
 use std::time::Instant;
@@ -125,7 +126,7 @@ impl SearchInfo {
 // Move ordering
 // ============================================================
 
-fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt_move: Move) -> Vec<i32> {
+fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt_move: Move, exp: &ExpTable) -> Vec<i32> {
     let mut scores = vec![0i32; list.len()];
     for i in 0..list.len() {
         let m = list.moves[i];
@@ -168,7 +169,7 @@ fn pick_move(list: &mut MoveList, scores: &mut [i32], start: usize) {
 // Quiescence search
 // ============================================================
 
-fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInfo) -> i32 {
+fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInfo, _exp: &ExpTable) -> i32 {
     info.nodes += 1;
     info.check_time();
     if info.stopped {
@@ -212,7 +213,7 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInf
             continue;
         }
 
-        let score = -quiescence(board, -beta, -alpha, info);
+        let score = -quiescence(board, -beta, -alpha, info, _exp);
         board.unmake_move(m);
 
         if info.stopped {
@@ -238,6 +239,7 @@ fn alpha_beta(
     board: &mut Board,
     tt: &mut TranspositionTable,
     info: &mut SearchInfo,
+    exp: &ExpTable,
     mut depth: i32,
     mut alpha: i32,
     beta: i32,
@@ -252,7 +254,7 @@ fn alpha_beta(
 
     // Drop into quiescence at depth 0
     if depth <= 0 {
-        return quiescence(board, alpha, beta, info);
+        return quiescence(board, alpha, beta, info, exp);
     }
 
     info.nodes += 1;
@@ -325,7 +327,7 @@ fn alpha_beta(
         if non_pawn_material != 0 {
             board.make_null_move();
             let r = if depth >= 6 { 3 } else { 2 }; // Adaptive null move reduction
-            let null_score = -alpha_beta(board, tt, info, depth - 1 - r, -beta, -beta + 1, ply + 1, false);
+            let null_score = -alpha_beta(board, tt, info, exp, depth - 1 - r, -beta, -beta + 1, ply + 1, false);
             board.unmake_null_move();
 
             if info.stopped {
@@ -351,7 +353,7 @@ fn alpha_beta(
     let mut list = MoveList::new();
     movegen::generate_moves(board, &mut list);
 
-    let mut scores = score_moves(&list, board, info, ply, tt_move);
+    let mut scores = score_moves(&list, board, info, ply, tt_move, exp);
 
     let mut best_move = MOVE_NONE;
     let mut best_score = -INFINITY;
@@ -390,15 +392,15 @@ fn alpha_beta(
             }
 
             let reduced_depth = (depth - 1 - reduction).max(1);
-            score = -alpha_beta(board, tt, info, reduced_depth, -alpha - 1, -alpha, ply + 1, true);
+            score = -alpha_beta(board, tt, info, exp, reduced_depth, -alpha - 1, -alpha, ply + 1, true);
 
             // Re-search at full depth if LMR score is above alpha
             if score > alpha {
-                score = -alpha_beta(board, tt, info, depth - 1, -alpha - 1, -alpha, ply + 1, true);
+                score = -alpha_beta(board, tt, info, exp, depth - 1, -alpha - 1, -alpha, ply + 1, true);
             }
         } else if moves_searched > 0 {
             // PVS: search with null window first
-            score = -alpha_beta(board, tt, info, depth - 1, -alpha - 1, -alpha, ply + 1, true);
+            score = -alpha_beta(board, tt, info, exp, depth - 1, -alpha - 1, -alpha, ply + 1, true);
         } else {
             // First move: full window search
             score = alpha + 1; // Force full search below
@@ -406,7 +408,7 @@ fn alpha_beta(
 
         // Full window re-search if needed
         if score > alpha {
-            score = -alpha_beta(board, tt, info, depth - 1, -beta, -alpha, ply + 1, true);
+            score = -alpha_beta(board, tt, info, exp, depth - 1, -beta, -alpha, ply + 1, true);
         }
 
         board.unmake_move(m);
@@ -468,7 +470,7 @@ pub struct SearchResult {
     pub time_ms: u64,
 }
 
-pub fn search(board: &mut Board, tt: &mut TranspositionTable, time_limit_ms: u64, max_depth: i32) -> SearchResult {
+pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, time_limit_ms: u64, max_depth: i32) -> SearchResult {
     let mut info = SearchInfo::new();
     let start_time = Instant::now();
     info.start_time = start_time;
@@ -493,7 +495,7 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, time_limit_ms: u64
 
         let mut score;
         loop {
-            score = alpha_beta(board, tt, &mut info, depth, alpha, beta, 0, true);
+            score = alpha_beta(board, tt, &mut info, exp, depth, alpha, beta, 0, true);
 
             if info.stopped {
                 break;
@@ -636,7 +638,8 @@ mod tests {
         setup();
         let mut board = Board::start_pos();
         let mut tt = TranspositionTable::new(16);
-        let result = search(&mut board, &mut tt, 1000, 5);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 1000, 5);
         assert!(!result.best_move.is_null());
         println!("Best move: {}, score: {}", result.best_move, result.score);
     }
@@ -647,7 +650,8 @@ mod tests {
         // White to move, Qh7# is mate in 1
         let mut board = Board::from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4").unwrap();
         let mut tt = TranspositionTable::new(16);
-        let result = search(&mut board, &mut tt, 5000, 6);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 5000, 6);
         // Should find Qxf7# (scholar's mate)
         println!("Best move: {}, score: {}", result.best_move, result.score);
         assert!(eval::is_mate_score(result.score), "Should find mate");
@@ -659,7 +663,8 @@ mod tests {
         // Position where queen is hanging
         let mut board = Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1").unwrap();
         let mut tt = TranspositionTable::new(16);
-        let result = search(&mut board, &mut tt, 1000, 5);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 1000, 5);
         assert!(!result.best_move.is_null());
     }
 
@@ -669,7 +674,8 @@ mod tests {
         // Back-rank mate in 2: 1. Re8+ Rxe8 2. Qxe8#
         let mut board = Board::from_fen("3r2k1/5ppp/8/8/8/8/4RPPP/4Q1K1 w - - 0 1").unwrap();
         let mut tt = TranspositionTable::new(16);
-        let result = search(&mut board, &mut tt, 10000, 10);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 10000, 10);
         println!("Mate-in-2: Best move: {}, score: {}", result.best_move, result.score);
         assert!(eval::is_mate_score(result.score), "Should find mate in 2");
         let mate_moves = eval::mate_in(result.score);
@@ -682,7 +688,8 @@ mod tests {
         // KQ vs K: forced mate in 6
         let mut board = Board::from_fen("8/4k3/8/8/2K5/8/8/Q7 w - - 0 1").unwrap();
         let mut tt = TranspositionTable::new(32);
-        let result = search(&mut board, &mut tt, 30000, 16);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 30000, 16);
         println!("Mate-in-6: Best move: {}, score: {}", result.best_move, result.score);
         assert!(eval::is_mate_score(result.score), "Should find mate in 6");
         let mate_moves = eval::mate_in(result.score);
@@ -695,7 +702,8 @@ mod tests {
         // KQ vs K: forced mate in 7 — verifies deep mate-finding capability
         let mut board = Board::from_fen("8/8/3k4/8/8/4K3/8/Q7 w - - 0 1").unwrap();
         let mut tt = TranspositionTable::new(32);
-        let result = search(&mut board, &mut tt, 30000, 20);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 30000, 20);
         println!("Mate-in-7: Best move: {}, score: {}", result.best_move, result.score);
         assert!(eval::is_mate_score(result.score), "Should find mate in 7");
         let mate_moves = eval::mate_in(result.score);

@@ -77,7 +77,7 @@ pub fn uci_loop() {
             "go" => {
                 let (time_ms, depth) = parse_go(&tokens, &board);
                 recorder.set_our_color(board.side.index() as u8);
-                let result = search::search(&mut board, &mut tt, time_ms, depth);
+                let result = search::search(&mut board, &mut tt, &exp_table, time_ms, depth);
                 // Record position for experience learning
                 recorder.record(
                     board.hash,
@@ -427,7 +427,8 @@ fn run_bench(tt: &mut TranspositionTable) {
     for fen in &positions {
         let mut board = Board::from_fen(fen).unwrap();
         tt.clear();
-        let result = search::search(&mut board, tt, 0, depth);
+        let exp = learn::ExpTable::new();
+        let result = search::search(&mut board, tt, &exp, 0, depth);
         total_nodes += result.nodes;
     }
 
