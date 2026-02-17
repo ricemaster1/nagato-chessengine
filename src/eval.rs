@@ -352,26 +352,154 @@ fn eval_king_safety(board: &Board, mg: &mut [i32; 2], _eg: &mut [i32; 2]) {
     }
 }
 
-/// Static exchange evaluation - determines if a capture sequence is winning
-/// Returns approximate material gain of the capture
+/// Static Exchange Evaluation — determines the material outcome of a capture
+/// sequence on a single square, assuming both sides play optimally.
+///
+/// Uses the "swap algorithm": we simulate alternating captures on the target
+/// square, tracking a gain stack, then propagate back with min/max to determine
+/// whether the side to move benefits from the initial capture.
+///
+/// Returns the net material gain (positive = good for the capturing side).
 pub fn see(board: &Board, m: Move) -> i32 {
     if !m.is_capture() {
         return 0;
     }
 
-    let target_sq = m.to_sq();
-    let mut gain = Vec::with_capacity(32);
+    let from = m.from_sq();
+    let to = m.to_sq();
 
-    // Initial capture gain
-    if m.is_en_passant() {
-        gain.push(PAWN_VALUE);
+    // Determine the initial captured piece value
+    let mut gain = [0i32; 32];
+    let mut depth: usize = 0;
+
+    gain[0] = if m.is_en_passant() {
+        PAWN_VALUE
     } else {
-        gain.push(PIECE_VALUES[m.captured_piece().index()]);
+        PIECE_VALUES[m.captured_piece().index()]
+    };
+
+    // The value of the piece making the initial capture (what the opponent can win back)
+    let mut attacker_value = if m.is_promotion() {
+        // If promoting, the piece that lands on the square is the promoted piece
+        PIECE_VALUES[m.promotion_piece().unwrap().index()]
+    } else {
+        PIECE_VALUES[m.piece().index()]
+    };
+
+    // If promoting, we also gain the promotion bonus (promoted - pawn)
+    if m.is_promotion() {
+        gain[0] += PIECE_VALUES[m.promotion_piece().unwrap().index()] - PAWN_VALUE;
     }
 
-    // For simplicity, use a basic version: just the initial exchange value
-    // A full SEE implementation will come in a later phase
-    gain[0]
+    // Working copy of occupancy — remove the initial attacker
+    let mut occ = board.all_occupancy;
+    occ &= !square_bb(from); // Remove attacker from occupancy
+
+    // For en passant, also remove the captured pawn from occupancy
+    if m.is_en_passant() {
+        let ep_cap_sq = match board.side {
+            Color::White => to - 8,
+            Color::Black => to + 8,
+        };
+        occ &= !square_bb(ep_cap_sq);
+    }
+
+    // Side making the *next* capture (opponent of the initial mover)
+    let mut side = board.side.flip();
+
+    loop {
+        depth += 1;
+        if depth >= 32 {
+            break;
+        }
+
+        // gain[d] = what we capture - what we stand to lose
+        // "what we stand to lose" is the attacker value from the previous ply
+        gain[depth] = attacker_value - gain[depth - 1];
+
+        // Pruning: if even the best case (standing pat) can't improve,
+        // the side to move at this depth would never make this capture.
+        // This is the "stand pat" optimization for SEE.
+        if (-gain[depth - 1]).max(gain[depth]) < 0 {
+            break;
+        }
+
+        // Find the least valuable attacker of `to` by `side`
+        let (attacker_sq, piece) = match least_valuable_attacker(board, to, side, occ) {
+            Some(result) => result,
+            None => break, // No more attackers — sequence ends
+        };
+
+        // Update attacker value for the next iteration
+        attacker_value = PIECE_VALUES[piece.index()];
+
+        // Remove this attacker from occupancy (it's now on `to`)
+        occ &= !square_bb(attacker_sq);
+
+        // If the attacker was a pawn or bishop or queen moving diagonally, or
+        // a rook or queen moving in a straight line, there may be an x-ray
+        // attacker behind it. By removing the piece from `occ`, the sliding
+        // piece attack lookups in `least_valuable_attacker` will naturally
+        // discover the x-ray attacker on the next iteration.
+
+        // Flip side
+        side = side.flip();
+    }
+
+    // Propagate the gain stack back: each side chooses the option that
+    // minimizes the opponent's gain (negamax-style).
+    while depth > 1 {
+        depth -= 1;
+        gain[depth] = -((-gain[depth]).max(gain[depth + 1]));
+    }
+
+    gain[1].max(-gain[0])
+}
+
+/// Find the least valuable piece of `side` that attacks `sq` given `occ`.
+/// Returns (attacker_square, piece_type) or None.
+fn least_valuable_attacker(board: &Board, sq: u8, side: Color, occ: Bitboard) -> Option<(u8, Piece)> {
+    let si = side.index();
+
+    // Pawns (cheapest)
+    let pawn_attackers = movegen::pawn_attacks(sq, side.flip()) & board.pieces[si][Piece::Pawn.index()] & occ;
+    if pawn_attackers != 0 {
+        return Some((lsb(pawn_attackers), Piece::Pawn));
+    }
+
+    // Knights
+    let knight_attackers = movegen::knight_attacks(sq) & board.pieces[si][Piece::Knight.index()] & occ;
+    if knight_attackers != 0 {
+        return Some((lsb(knight_attackers), Piece::Knight));
+    }
+
+    // Bishops
+    let bishop_attacks = movegen::bishop_attacks(sq, occ);
+    let bishop_attackers = bishop_attacks & board.pieces[si][Piece::Bishop.index()] & occ;
+    if bishop_attackers != 0 {
+        return Some((lsb(bishop_attackers), Piece::Bishop));
+    }
+
+    // Rooks
+    let rook_attacks = movegen::rook_attacks(sq, occ);
+    let rook_attackers = rook_attacks & board.pieces[si][Piece::Rook.index()] & occ;
+    if rook_attackers != 0 {
+        return Some((lsb(rook_attackers), Piece::Rook));
+    }
+
+    // Queens (use both bishop + rook rays)
+    let queen_attackers = (bishop_attacks | rook_attacks) & board.pieces[si][Piece::Queen.index()] & occ;
+    if queen_attackers != 0 {
+        return Some((lsb(queen_attackers), Piece::Queen));
+    }
+
+    // King (most expensive — only if no other attacker)
+    let king_attackers = movegen::king_attacks(sq) & board.pieces[si][Piece::King.index()] & occ;
+    if king_attackers != 0 {
+        return Some((lsb(king_attackers), Piece::King));
+    }
+
+    None
 }
 
 // ============================================================
@@ -420,11 +548,18 @@ pub fn mate_in(score: i32) -> i32 {
 mod tests {
     use super::*;
     use crate::board::Board;
+    use crate::movegen;
+    use crate::moves::*;
+    use crate::bitboard::sq;
+
+    fn setup() {
+        crate::zobrist::init();
+        movegen::init();
+    }
 
     #[test]
     fn test_eval_start_pos() {
-        crate::zobrist::init();
-        crate::movegen::init();
+        setup();
         let board = Board::start_pos();
         let score = evaluate(&board);
         // Starting position should be roughly equal
@@ -433,12 +568,138 @@ mod tests {
 
     #[test]
     fn test_eval_material_advantage() {
-        crate::zobrist::init();
-        crate::movegen::init();
+        setup();
         // White has an extra queen
         let board = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
         let score = evaluate(&board);
         // Should be symmetric-ish at start
         assert!(score.abs() < 50);
+    }
+
+    // ---- SEE tests ----
+
+    /// Helper: find a move from `from_str` to `to_str` in the legal move list
+    fn find_move(board: &Board, from_str: &str, to_str: &str) -> Move {
+        use crate::bitboard::parse_square;
+        let from = parse_square(from_str).unwrap();
+        let to = parse_square(to_str).unwrap();
+        let mut list = MoveList::new();
+        movegen::generate_moves(board, &mut list);
+        for i in 0..list.len() {
+            let m = list.moves[i];
+            if m.from_sq() == from && m.to_sq() == to && !m.is_promotion() {
+                return m;
+            }
+        }
+        panic!("Move {}→{} not found in legal moves", from_str, to_str);
+    }
+
+    fn find_promo_move(board: &Board, from_str: &str, to_str: &str, promo: Piece) -> Move {
+        use crate::bitboard::parse_square;
+        let from = parse_square(from_str).unwrap();
+        let to = parse_square(to_str).unwrap();
+        let mut list = MoveList::new();
+        movegen::generate_moves(board, &mut list);
+        for i in 0..list.len() {
+            let m = list.moves[i];
+            if m.from_sq() == from && m.to_sq() == to && m.promotion_piece() == Some(promo) {
+                return m;
+            }
+        }
+        panic!("Promo move {}→{} not found", from_str, to_str);
+    }
+
+    #[test]
+    fn test_see_simple_pawn_takes_pawn() {
+        setup();
+        // White pawn on e4, black pawn on d5 — PxP is even
+        let board = Board::from_fen("8/8/8/3p4/4P3/8/8/4K2k w - - 0 1").unwrap();
+        let m = find_move(&board, "e4", "d5");
+        let score = see(&board, m);
+        assert_eq!(score, PAWN_VALUE, "PxP with no defenders should win a pawn");
+    }
+
+    #[test]
+    fn test_see_pawn_takes_defended_pawn() {
+        setup();
+        // White pawn e4, black pawn d5 defended by pawn on e6
+        let board = Board::from_fen("8/8/4p3/3p4/4P3/8/8/4K2k w - - 0 1").unwrap();
+        let m = find_move(&board, "e4", "d5");
+        let score = see(&board, m);
+        // PxP, then pxP recapture — net 0 (exchange pawns)
+        assert_eq!(score, 0, "PxP with pawn defender should be 0");
+    }
+
+    #[test]
+    fn test_see_knight_takes_defended_pawn() {
+        setup();
+        // White knight on c3, black pawn on d5 defended by pawn on e6
+        let board = Board::from_fen("8/8/4p3/3p4/8/2N5/8/4K2k w - - 0 1").unwrap();
+        let m = find_move(&board, "c3", "d5");
+        let score = see(&board, m);
+        // NxP (gain 100), then pxN (they gain 320) — net: 100 - 320 = -220
+        assert!(score < 0, "Knight taking pawn defended by pawn should be negative, got {}", score);
+    }
+
+    #[test]
+    fn test_see_queen_takes_defended_pawn() {
+        setup();
+        // White queen on d1, black pawn on d5 defended by pawn on e6
+        let board = Board::from_fen("8/8/4p3/3p4/8/8/8/3QK2k w - - 0 1").unwrap();
+        let m = find_move(&board, "d1", "d5");
+        let score = see(&board, m);
+        // QxP (gain 100), then pxQ (they gain 900) — net: 100 - 900 = bad
+        assert!(score < 0, "Queen taking defended pawn should be losing, got {}", score);
+    }
+
+    #[test]
+    fn test_see_rook_takes_rook() {
+        setup();
+        // White rook e1, black rook e8, open file — RxR is even (undefended)
+        let board = Board::from_fen("4r3/8/8/8/8/8/8/4RK1k w - - 0 1").unwrap();
+        let m = find_move(&board, "e1", "e8");
+        let score = see(&board, m);
+        assert_eq!(score, ROOK_VALUE, "RxR undefended should win a rook");
+    }
+
+    #[test]
+    fn test_see_xray_battery() {
+        setup();
+        // White rook e1, white rook e2 (battery), black rook e8
+        // RxR, opponent has nothing — gain 500
+        let board = Board::from_fen("4r3/8/8/8/8/8/4R3/4RK1k w - - 0 1").unwrap();
+        let m = find_move(&board, "e2", "e8");
+        let score = see(&board, m);
+        assert_eq!(score, ROOK_VALUE, "RxR with rook behind should win");
+    }
+
+    #[test]
+    fn test_see_pawn_takes_queen() {
+        setup();
+        // White pawn on e4, black queen on d5 — PxQ wins a queen
+        let board = Board::from_fen("8/8/8/3q4/4P3/8/8/4K2k w - - 0 1").unwrap();
+        let m = find_move(&board, "e4", "d5");
+        let score = see(&board, m);
+        assert_eq!(score, QUEEN_VALUE, "PxQ undefended should win queen value");
+    }
+
+    #[test]
+    fn test_see_non_capture_returns_zero() {
+        setup();
+        let board = Board::start_pos();
+        let m = find_move(&board, "e2", "e4");
+        let score = see(&board, m);
+        assert_eq!(score, 0, "Non-capture should return 0");
+    }
+
+    #[test]
+    fn test_see_bishop_takes_knight_with_recapture() {
+        setup();
+        // White bishop c1, black knight on e3, defended by pawn d4
+        // BxN (gain 320), pxB (they gain 330) — net: 320 - 330 = -10
+        let board = Board::from_fen("8/8/8/8/3p4/4n3/8/2B1K2k w - - 0 1").unwrap();
+        let m = find_move(&board, "c1", "e3");
+        let score = see(&board, m);
+        assert!(score < 0, "BxN defended by pawn should be negative, got {}", score);
     }
 }

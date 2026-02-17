@@ -134,7 +134,14 @@ fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt
         if m.0 == tt_move.0 && !tt_move.is_null() {
             scores[i] = 10_000_000; // TT move first
         } else if m.is_capture() || m.is_en_passant() {
-            scores[i] = 1_000_000 + eval::mvv_lva_score(m);
+            let see_val = eval::see(board, m);
+            if see_val >= 0 {
+                // Winning/equal captures: above killers, ordered by MVV-LVA
+                scores[i] = 1_000_000 + eval::mvv_lva_score(m);
+            } else {
+                // Losing captures: below killers and history, ordered by SEE
+                scores[i] = -100_000 + see_val;
+            }
         } else if m.is_promotion() {
             scores[i] = 900_000;
         } else if ply < 128 && m.0 == info.killers[ply][0].0 {
