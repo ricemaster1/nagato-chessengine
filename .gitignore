@@ -15,6 +15,8 @@ Thumbs.db
 # Local stuff
 cutechess/
 assets/
+games/
+testing/
 
 # Tablebase files and pgn (too large for git)
 *.rtbw
