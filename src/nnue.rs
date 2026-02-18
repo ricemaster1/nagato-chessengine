@@ -13,6 +13,15 @@
 ///
 /// The accumulator is incrementally updated on make/unmake for efficiency.
 
+/// I plan to decouple this file later
+/*
+│   ├── nnue/                     # promote to submodule (will grow a lot)
+│   │   ├── mod.rs                # re-exports, init(), is_active(), evaluate()
+│   │   ├── network.rs            # weights struct, load, forward pass
+│   │   ├── accumulator.rs        # Accumulator struct, refresh, add/remove/move
+│   │   └── features.rs           # feature_index_white/black, input mapping
+*/
+
 use crate::bitboard::*;
 use crate::board::Board;
 
