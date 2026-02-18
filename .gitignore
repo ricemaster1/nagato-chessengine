@@ -17,7 +17,12 @@ cutechess/
 assets/
 games/
 testing/
+training/
 src/bin
+
+# NNUE weights & training data
+nn.bin
+training_data.bin
 
 # Tablebase files and pgn (too large for git)
 *.rtbw

@@ -7,6 +7,7 @@ use crate::eval;
 use crate::learn::{self, ExpTable, GameRecorder};
 use crate::movegen;
 use crate::moves::*;
+use crate::nnue;
 use crate::search::{self, TranspositionTable};
 use std::io::{self, BufRead};
 use std::path::PathBuf;
@@ -145,6 +146,27 @@ pub fn uci_loop() {
             }
             "bench" => {
                 run_bench(&mut tt);
+            }
+            "datagen" => {
+                // datagen [games N] [depth D] [output FILE] [random_plies R]
+                let mut num_games = 1000u32;
+                let mut depth = 6i32;
+                let mut output = "training_data.bin".to_string();
+                let mut random_plies = 8u32;
+
+                let mut i = 1;
+                while i < tokens.len() {
+                    match tokens[i] {
+                        "games" => { i += 1; if i < tokens.len() { num_games = tokens[i].parse().unwrap_or(1000); } }
+                        "depth" => { i += 1; if i < tokens.len() { depth = tokens[i].parse().unwrap_or(6); } }
+                        "output" => { i += 1; if i < tokens.len() { output = tokens[i].to_string(); } }
+                        "random_plies" => { i += 1; if i < tokens.len() { random_plies = tokens[i].parse().unwrap_or(8); } }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+
+                crate::datagen::generate(num_games, depth, &output, random_plies);
             }
             "setoption" => {
                 parse_setoption(&tokens, &mut tt, &mut exp_path, &mut exp_table, &mut use_experience);

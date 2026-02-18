@@ -3,6 +3,7 @@
 
 use crate::bitboard::*;
 use crate::moves::*;
+use crate::nnue;
 use crate::zobrist;
 
 /// Castling rights encoded as 4 bits
@@ -48,6 +49,11 @@ pub struct Board {
 
     /// Undo stack
     pub history: Vec<UndoInfo>,
+
+    /// NNUE accumulator for the current position
+    pub accumulator: nnue::Accumulator,
+    /// NNUE accumulator undo stack
+    pub acc_history: Vec<nnue::Accumulator>,
 }
 
 pub const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -66,6 +72,8 @@ impl Board {
             fullmove: 1,
             hash: 0,
             history: Vec::with_capacity(256),
+            accumulator: nnue::Accumulator::new(),
+            acc_history: Vec::with_capacity(256),
         }
     }
 
@@ -148,6 +156,13 @@ impl Board {
 
         // Compute hash
         board.hash = board.compute_hash();
+
+        // Refresh NNUE accumulator
+        if nnue::is_active() {
+            let mut acc = nnue::Accumulator::new();
+            nnue::refresh_accumulator(&board, &mut acc);
+            board.accumulator = acc;
+        }
 
         Ok(board)
     }
@@ -315,6 +330,12 @@ impl Board {
     /// (i.e., the side that just moved is not in check)
     pub fn make_move(&mut self, m: Move) -> bool {
         let keys = zobrist::keys();
+        let nnue_active = nnue::is_active();
+
+        // Save NNUE accumulator for undo
+        if nnue_active {
+            self.acc_history.push(self.accumulator.clone());
+        }
 
         // Save undo info
         let captured = if m.is_capture() && !m.is_en_passant() {
@@ -443,6 +464,55 @@ impl Board {
             _ => unreachable!("Unknown move flag: {:04b}", m.flags()),
         }
 
+        // NNUE accumulator incremental update
+        if nnue_active {
+            let acc = &mut self.accumulator;
+            match m.flags() {
+                FLAG_QUIET | FLAG_DOUBLE_PAWN => {
+                    nnue::accumulator_move(acc, piece, us, from, to);
+                }
+                FLAG_KING_CASTLE => {
+                    nnue::accumulator_move(acc, Piece::King, us, from, to);
+                    let (rook_from, rook_to) = match us {
+                        Color::White => (sq::H1, sq::F1),
+                        Color::Black => (sq::H8, sq::F8),
+                    };
+                    nnue::accumulator_move(acc, Piece::Rook, us, rook_from, rook_to);
+                }
+                FLAG_QUEEN_CASTLE => {
+                    nnue::accumulator_move(acc, Piece::King, us, from, to);
+                    let (rook_from, rook_to) = match us {
+                        Color::White => (sq::A1, sq::D1),
+                        Color::Black => (sq::A8, sq::D8),
+                    };
+                    nnue::accumulator_move(acc, Piece::Rook, us, rook_from, rook_to);
+                }
+                FLAG_CAPTURE => {
+                    let cap = captured.unwrap();
+                    nnue::accumulator_remove(acc, cap, them, to);
+                    nnue::accumulator_move(acc, piece, us, from, to);
+                }
+                FLAG_EP_CAPTURE => {
+                    let cap_sq = match us {
+                        Color::White => to - 8,
+                        Color::Black => to + 8,
+                    };
+                    nnue::accumulator_remove(acc, Piece::Pawn, them, cap_sq);
+                    nnue::accumulator_move(acc, Piece::Pawn, us, from, to);
+                }
+                _ if m.is_promotion() => {
+                    let promo = m.promotion_piece().unwrap();
+                    nnue::accumulator_remove(acc, Piece::Pawn, us, from);
+                    if m.is_capture() {
+                        let cap = captured.unwrap();
+                        nnue::accumulator_remove(acc, cap, them, to);
+                    }
+                    nnue::accumulator_add(acc, promo, us, to);
+                }
+                _ => {}
+            }
+        }
+
         // Update castling rights
         self.castling &= Self::CASTLE_MASK[from as usize] & Self::CASTLE_MASK[to as usize];
         self.hash ^= keys.castle_keys[self.castling as usize];
@@ -467,6 +537,13 @@ impl Board {
     /// Unmake a move, restoring the previous board state
     pub fn unmake_move(&mut self, m: Move) {
         let undo = self.history.pop().expect("No undo info on stack");
+
+        // Restore NNUE accumulator
+        if nnue::is_active() {
+            if let Some(prev_acc) = self.acc_history.pop() {
+                self.accumulator = prev_acc;
+            }
+        }
 
         // Flip side back
         self.side = self.side.flip();

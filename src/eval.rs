@@ -5,6 +5,7 @@ use crate::bitboard::*;
 use crate::board::Board;
 use crate::movegen;
 use crate::moves::Move;
+use crate::nnue;
 
 // ============================================================
 // Material values (centipawns)
@@ -132,6 +133,16 @@ fn compute_phase(board: &Board) -> i32 {
 /// Main evaluation function. Returns score in centipawns from the perspective
 /// of the side to move.
 pub fn evaluate(board: &Board) -> i32 {
+    // Use NNUE if available, otherwise fall back to HCE
+    if nnue::is_active() {
+        return nnue::evaluate(board, &board.accumulator);
+    }
+
+    evaluate_hce(board)
+}
+
+/// Hand-crafted evaluation (HCE) — the classical evaluation function.
+fn evaluate_hce(board: &Board) -> i32 {
     let mut mg_score: [i32; 2] = [0, 0]; // midgame score per side
     let mut eg_score: [i32; 2] = [0, 0]; // endgame score per side
 
