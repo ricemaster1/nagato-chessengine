@@ -33,3 +33,4 @@ training_data.bin
 # Experience data (generated at runtime)
 *.exp
 
+sync-to-ubuntu.sh
