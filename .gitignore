@@ -20,9 +20,9 @@ training/
 testing/
 src/bin
 
-# Generated data directory (keep structure, ignore contents)
-data/*
-!data/.gitkeep
+# Local directories
+data/
+scripts/
 
 # NNUE weights & training data
 nn.bin

@@ -1,9 +1,0 @@
-# NNUE Training Dependencies
-# Install PyTorch with ROCm support (AMD GPUs):
-#   pip install torch --index-url https://download.pytorch.org/whl/rocm6.2
-# Install PyTorch with CUDA support (NVIDIA GPUs):
-#   pip install torch --index-url https://download.pytorch.org/whl/cu124
-# Install PyTorch CPU-only:
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-numpy>=1.24
