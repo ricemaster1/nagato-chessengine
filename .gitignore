@@ -17,6 +17,7 @@ cutechess/
 assets/
 games/
 testing/
+src/bin
 
 # Tablebase files and pgn (too large for git)
 *.rtbw
