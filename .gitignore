@@ -17,8 +17,11 @@ cutechess/
 assets/
 games/
 testing/
-training/
 src/bin
+
+# Generated data directory (keep structure, ignore contents)
+data/*
+!data/.gitkeep
 
 # NNUE weights & training data
 nn.bin

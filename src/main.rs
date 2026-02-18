@@ -7,8 +7,8 @@ mod uci;
 mod search;
 mod eval;
 mod learn;
-mod nnue;
 mod datagen;
+mod nnue;
 
 fn main() {
     zobrist::init();

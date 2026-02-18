@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+
+# Training artifacts
+wandb/
+checkpoints/
+*.bin
+*.pt
+*.onnx

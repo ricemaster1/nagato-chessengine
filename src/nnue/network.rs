@@ -1,95 +1,13 @@
-/// NNUE (Efficiently Updatable Neural Network) evaluation module.
-///
-/// Architecture: "Baby NNUE" — Phase 1
-///   Input:  768 piece-square features (color × piece × square)
-///   Layer1: 768 → HIDDEN (per-perspective, ClippedReLU)
-///   Concat: 2 × HIDDEN from both perspectives
-///   Layer2: 2*HIDDEN → L2_SIZE (ClippedReLU)
-///   Output: L2_SIZE → 1 (linear)
-///
-/// Features are encoded as: color * 384 + piece * 64 + square
-/// White's perspective uses the raw encoding.
-/// Black's perspective flips color and mirrors the square vertically.
-///
-/// The accumulator is incrementally updated on make/unmake for efficiency.
+//! NNUE network weights, loading, and forward pass.
 
-/// I plan to decouple this file later
-/*
-│   ├── nnue/                     # promote to submodule (will grow a lot)
-│   │   ├── mod.rs                # re-exports, init(), is_active(), evaluate()
-│   │   ├── network.rs            # weights struct, load, forward pass
-│   │   ├── accumulator.rs        # Accumulator struct, refresh, add/remove/move
-│   │   └── features.rs           # feature_index_white/black, input mapping
-*/
-
-use crate::bitboard::*;
+use crate::bitboard::Color;
 use crate::board::Board;
 
-// ============================================================
-// Network dimensions
-// ============================================================
+use super::{L1_SIZE, L2_SIZE, INPUT_SIZE};
+use super::accumulator::Accumulator;
 
-/// First hidden layer size (per perspective)
-pub const L1_SIZE: usize = 128;
-/// Second hidden layer size
-pub const L2_SIZE: usize = 32;
-/// Input feature count (2 colors × 6 pieces × 64 squares)
-pub const INPUT_SIZE: usize = 768;
-
-// ============================================================
-// Accumulator — one per perspective (white/black)
-// ============================================================
-
-/// The accumulator stores the pre-activation values for layer 1.
-/// It can be incrementally updated when pieces move.
-#[derive(Clone)]
-pub struct Accumulator {
-    /// Layer 1 values for white's perspective
-    pub white: [f32; L1_SIZE],
-    /// Layer 1 values for black's perspective
-    pub black: [f32; L1_SIZE],
-}
-
-impl Accumulator {
-    pub fn new() -> Self {
-        Accumulator {
-            white: [0.0; L1_SIZE],
-            black: [0.0; L1_SIZE],
-        }
-    }
-}
-
-// ============================================================
-// Feature index encoding
-// ============================================================
-
-/// Compute the feature index for a piece on a square from a given perspective.
-///
-/// From white's perspective:
-///   white pieces: piece * 64 + sq
-///   black pieces: 384 + piece * 64 + sq
-///
-/// From black's perspective (mirror):
-///   black pieces: piece * 64 + flip(sq)
-///   white pieces: 384 + piece * 64 + flip(sq)
-#[inline]
-pub fn feature_index_white(piece: Piece, color: Color, sq: u8) -> usize {
-    let color_offset = match color {
-        Color::White => 0,
-        Color::Black => 384,
-    };
-    color_offset + piece.index() * 64 + sq as usize
-}
-
-#[inline]
-pub fn feature_index_black(piece: Piece, color: Color, sq: u8) -> usize {
-    let flipped = sq ^ 56; // vertical mirror
-    let color_offset = match color {
-        Color::Black => 0,   // black's own pieces first
-        Color::White => 384, // opponent's pieces second
-    };
-    color_offset + piece.index() * 64 + flipped as usize
-}
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ============================================================
 // Network weights
@@ -111,24 +29,21 @@ pub struct NnueWeights {
     pub output_bias: f32,
 }
 
-/// Global singleton for the loaded NNUE weights.
-/// None if NNUE is not loaded (falls back to HCE).
-use std::sync::OnceLock;
+// ============================================================
+// Global state
+// ============================================================
 
 static NNUE_STATE: OnceLock<NnueWeights> = OnceLock::new();
-static NNUE_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static NNUE_LOADED: AtomicBool = AtomicBool::new(false);
 
-/// Initialize NNUE from embedded weights or external file.
-/// Call this once at startup.
+/// Initialize NNUE from nn.bin. Call once at startup.
 pub fn init() {
-    // Try to load from the default embedded path or external file.
-    // If no weights file exists, NNUE remains inactive and HCE is used.
     let path = std::path::Path::new("nn.bin");
     if path.exists() {
         match load_weights_from_file(path) {
-            Ok(weights) => {
-                let _ = NNUE_STATE.set(weights);
-                NNUE_LOADED.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(w) => {
+                let _ = NNUE_STATE.set(w);
+                NNUE_LOADED.store(true, Ordering::Relaxed);
                 eprintln!("info string NNUE loaded from nn.bin");
             }
             Err(e) => {
@@ -140,15 +55,15 @@ pub fn init() {
     }
 }
 
-/// Check if NNUE is loaded and active
+/// Check if NNUE is loaded and active.
 #[inline]
 pub fn is_active() -> bool {
-    NNUE_LOADED.load(std::sync::atomic::Ordering::Relaxed)
+    NNUE_LOADED.load(Ordering::Relaxed)
 }
 
-/// Get a reference to the loaded weights (panics if not active)
+/// Get a reference to the loaded weights (panics if not loaded).
 #[inline]
-fn weights() -> &'static NnueWeights {
+pub(super) fn weights() -> &'static NnueWeights {
     NNUE_STATE.get().unwrap()
 }
 
@@ -270,77 +185,7 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
 }
 
 // ============================================================
-// Accumulator operations
-// ============================================================
-
-/// Compute the full accumulator from scratch for a given board position.
-/// This is used when setting up a new position (e.g., from FEN or at the start).
-pub fn refresh_accumulator(board: &Board, acc: &mut Accumulator) {
-    let w = weights();
-
-    // Start with biases
-    acc.white = w.l1_biases;
-    acc.black = w.l1_biases;
-
-    // Add each piece's feature contribution
-    for color_idx in 0..COLOR_COUNT {
-        let color = if color_idx == 0 { Color::White } else { Color::Black };
-        for piece_idx in 0..PIECE_COUNT {
-            let piece: Piece = unsafe { std::mem::transmute(piece_idx as u8) };
-            let mut bb = board.pieces[color_idx][piece_idx];
-            while bb != 0 {
-                let sq = pop_lsb(&mut bb);
-                let wi = feature_index_white(piece, color, sq);
-                let bi = feature_index_black(piece, color, sq);
-                for j in 0..L1_SIZE {
-                    acc.white[j] += w.l1_weights[wi][j];
-                    acc.black[j] += w.l1_weights[bi][j];
-                }
-            }
-        }
-    }
-}
-
-/// Incrementally add a piece feature to the accumulator.
-#[inline]
-pub fn accumulator_add(acc: &mut Accumulator, piece: Piece, color: Color, sq: u8) {
-    let w = weights();
-    let wi = feature_index_white(piece, color, sq);
-    let bi = feature_index_black(piece, color, sq);
-    for j in 0..L1_SIZE {
-        acc.white[j] += w.l1_weights[wi][j];
-        acc.black[j] += w.l1_weights[bi][j];
-    }
-}
-
-/// Incrementally remove a piece feature from the accumulator.
-#[inline]
-pub fn accumulator_remove(acc: &mut Accumulator, piece: Piece, color: Color, sq: u8) {
-    let w = weights();
-    let wi = feature_index_white(piece, color, sq);
-    let bi = feature_index_black(piece, color, sq);
-    for j in 0..L1_SIZE {
-        acc.white[j] -= w.l1_weights[wi][j];
-        acc.black[j] -= w.l1_weights[bi][j];
-    }
-}
-
-/// Incrementally move a piece (remove from `from`, add to `to`).
-#[inline]
-pub fn accumulator_move(acc: &mut Accumulator, piece: Piece, color: Color, from: u8, to: u8) {
-    let w = weights();
-    let wi_from = feature_index_white(piece, color, from);
-    let wi_to   = feature_index_white(piece, color, to);
-    let bi_from = feature_index_black(piece, color, from);
-    let bi_to   = feature_index_black(piece, color, to);
-    for j in 0..L1_SIZE {
-        acc.white[j] += w.l1_weights[wi_to][j] - w.l1_weights[wi_from][j];
-        acc.black[j] += w.l1_weights[bi_to][j] - w.l1_weights[bi_from][j];
-    }
-}
-
-// ============================================================
-// Forward pass — evaluate from the accumulator
+// Forward pass
 // ============================================================
 
 /// ClippedReLU activation: clamp(x, 0, 1)
@@ -397,7 +242,7 @@ pub fn forward(acc: &Accumulator, side: Color) -> i32 {
 }
 
 // ============================================================
-// High-level evaluation — called from eval.rs
+// High-level evaluation
 // ============================================================
 
 /// Evaluate the position using NNUE. Requires a pre-computed accumulator.
@@ -413,43 +258,6 @@ pub fn evaluate(board: &Board, acc: &Accumulator) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_feature_index_bounds() {
-        // White pawn on a1 from white's perspective
-        let idx = feature_index_white(Piece::Pawn, Color::White, 0);
-        assert_eq!(idx, 0);
-
-        // Black king on h8 from white's perspective
-        let idx = feature_index_white(Piece::King, Color::Black, 63);
-        assert_eq!(idx, 384 + 5 * 64 + 63);
-        assert!(idx < INPUT_SIZE);
-
-        // From black's perspective: black pawn on a8 (sq=56), after flip = sq=0
-        let idx = feature_index_black(Piece::Pawn, Color::Black, 56);
-        assert_eq!(idx, 0 * 64 + 0); // color_offset=0, piece=0, flipped=0
-
-        // White king on e1 (sq=4) from black's perspective: flip = 60
-        let idx = feature_index_black(Piece::King, Color::White, 4);
-        assert_eq!(idx, 384 + 5 * 64 + 60);
-        assert!(idx < INPUT_SIZE);
-    }
-
-    #[test]
-    fn test_feature_index_symmetry() {
-        // A white pawn on e2 from white's perspective should map to the same
-        // feature as a black pawn on e7 from black's perspective (mirrored).
-        let w_idx = feature_index_white(Piece::Pawn, Color::White, sq::E2);
-        let b_idx = feature_index_black(Piece::Pawn, Color::Black, sq::E7);
-        assert_eq!(w_idx, b_idx, "Symmetric positions should have same feature index");
-    }
-
-    #[test]
-    fn test_accumulator_new() {
-        let acc = Accumulator::new();
-        assert!(acc.white.iter().all(|&v| v == 0.0));
-        assert!(acc.black.iter().all(|&v| v == 0.0));
-    }
 
     #[test]
     fn test_clipped_relu() {
