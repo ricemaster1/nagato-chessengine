@@ -54,6 +54,54 @@ pub fn king_bucket_of(sq: u8) -> usize {
     9
 }
 
+/// Number of piece types excluding the king
+pub const PIECES_EX_KING: usize = 5; // pawn, knight, bishop, rook, queen
+/// Squares per piece
+pub const SQUARES_PER_PIECE: usize = 64;
+/// Per-color features per bucket: 5 piece types * 64 squares
+pub const PER_COLOR_BUCKET: usize = PIECES_EX_KING * SQUARES_PER_PIECE; // 320
+/// Total features per bucket (both colors)
+pub const PER_BUCKET_FEATURES: usize = PER_COLOR_BUCKET * 2; // 640
+
+/// Compute index for piece type excluding king. Returns None for `Piece::King`.
+#[inline]
+pub fn piece_index_no_king(piece: Piece) -> Option<usize> {
+    match piece {
+        Piece::Pawn => Some(0),
+        Piece::Knight => Some(1),
+        Piece::Bishop => Some(2),
+        Piece::Rook => Some(3),
+        Piece::Queen => Some(4),
+        Piece::King => None,
+    }
+}
+
+/// Half-KP feature index for white's perspective.
+/// Layout per bucket: (own 5*64) then (opp 5*64)
+#[inline]
+pub fn feature_index_halfkp_white(piece: Piece, color: Color, sq: u8, king_sq: u8) -> usize {
+    let bucket = king_bucket_of(king_sq);
+    let piece_no_king = piece_index_no_king(piece).expect("King has no HalfKP feature");
+    let color_offset = match color {
+        Color::White => 0,
+        Color::Black => PER_COLOR_BUCKET,
+    };
+    bucket * PER_BUCKET_FEATURES + color_offset + piece_no_king * 64 + sq as usize
+}
+
+/// Half-KP feature index for black's perspective. Squares are vertically flipped.
+#[inline]
+pub fn feature_index_halfkp_black(piece: Piece, color: Color, sq: u8, king_sq: u8) -> usize {
+    let flipped = sq ^ 56;
+    let bucket = king_bucket_of(king_sq);
+    let piece_no_king = piece_index_no_king(piece).expect("King has no HalfKP feature");
+    let color_offset = match color {
+        Color::Black => 0,
+        Color::White => PER_COLOR_BUCKET,
+    };
+    bucket * PER_BUCKET_FEATURES + color_offset + piece_no_king * 64 + flipped as usize
+}
+
 /// Compute the feature index for a piece on a square from white's perspective.
 ///
 /// White pieces: piece * 64 + sq
