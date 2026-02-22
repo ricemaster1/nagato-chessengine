@@ -7,7 +7,13 @@ use crate::bitboard::*;
 use crate::board::Board;
 
 use super::L1_SIZE;
-use super::features::{feature_index_white, feature_index_black};
+use super::features::{
+    feature_index_white,
+    feature_index_black,
+    feature_index_halfkp_white,
+    feature_index_halfkp_black,
+    piece_index_no_king,
+};
 use super::network::weights;
 
 /// The accumulator stores the pre-activation values for layer 1.
@@ -37,20 +43,42 @@ pub fn refresh_accumulator(board: &Board, acc: &mut Accumulator) {
     // Start with biases
     acc.white = w.l1_biases;
     acc.black = w.l1_biases;
-
     // Add each piece's feature contribution
-    for color_idx in 0..COLOR_COUNT {
-        let color = if color_idx == 0 { Color::White } else { Color::Black };
-        for piece_idx in 0..PIECE_COUNT {
-            let piece: Piece = unsafe { std::mem::transmute(piece_idx as u8) };
-            let mut bb = board.pieces[color_idx][piece_idx];
-            while bb != 0 {
-                let sq = pop_lsb(&mut bb);
-                let wi = feature_index_white(piece, color, sq);
-                let bi = feature_index_black(piece, color, sq);
-                for j in 0..L1_SIZE {
-                    acc.white[j] += w.l1_weights[wi][j];
-                    acc.black[j] += w.l1_weights[bi][j];
+    if w.version == 1 {
+        for color_idx in 0..COLOR_COUNT {
+            let color = if color_idx == 0 { Color::White } else { Color::Black };
+            for piece_idx in 0..PIECE_COUNT {
+                let piece: Piece = unsafe { std::mem::transmute(piece_idx as u8) };
+                let mut bb = board.pieces[color_idx][piece_idx];
+                while bb != 0 {
+                    let sq = pop_lsb(&mut bb);
+                    let wi = feature_index_white(piece, color, sq);
+                    let bi = feature_index_black(piece, color, sq);
+                    for j in 0..L1_SIZE {
+                        acc.white[j] += w.l1_weights[wi][j];
+                        acc.black[j] += w.l1_weights[bi][j];
+                    }
+                }
+            }
+        }
+    } else {
+        // version 2: HalfKP (king-bucketed features), skip kings
+        let white_king = board.king_sq(Color::White);
+        let black_king = board.king_sq(Color::Black);
+        for color_idx in 0..COLOR_COUNT {
+            let color = if color_idx == 0 { Color::White } else { Color::Black };
+            for piece_idx in 0..PIECE_COUNT {
+                let piece: Piece = unsafe { std::mem::transmute(piece_idx as u8) };
+                if piece == Piece::King { continue; }
+                let mut bb = board.pieces[color_idx][piece_idx];
+                while bb != 0 {
+                    let sq = pop_lsb(&mut bb);
+                    let wi = feature_index_halfkp_white(piece, color, sq, white_king);
+                    let bi = feature_index_halfkp_black(piece, color, sq, black_king);
+                    for j in 0..L1_SIZE {
+                        acc.white[j] += w.l1_weights[wi][j];
+                        acc.black[j] += w.l1_weights[bi][j];
+                    }
                 }
             }
         }
@@ -59,39 +87,72 @@ pub fn refresh_accumulator(board: &Board, acc: &mut Accumulator) {
 
 /// Incrementally add a piece feature to the accumulator.
 #[inline]
-pub fn accumulator_add(acc: &mut Accumulator, piece: Piece, color: Color, sq: u8) {
+pub fn accumulator_add(acc: &mut Accumulator, piece: Piece, color: Color, sq: u8, white_king: u8, black_king: u8) {
     let w = weights();
-    let wi = feature_index_white(piece, color, sq);
-    let bi = feature_index_black(piece, color, sq);
-    for j in 0..L1_SIZE {
-        acc.white[j] += w.l1_weights[wi][j];
-        acc.black[j] += w.l1_weights[bi][j];
+    if w.version == 1 {
+        let wi = feature_index_white(piece, color, sq);
+        let bi = feature_index_black(piece, color, sq);
+        for j in 0..L1_SIZE {
+            acc.white[j] += w.l1_weights[wi][j];
+            acc.black[j] += w.l1_weights[bi][j];
+        }
+    } else {
+        if piece == Piece::King { return; }
+        let wi = feature_index_halfkp_white(piece, color, sq, white_king);
+        let bi = feature_index_halfkp_black(piece, color, sq, black_king);
+        for j in 0..L1_SIZE {
+            acc.white[j] += w.l1_weights[wi][j];
+            acc.black[j] += w.l1_weights[bi][j];
+        }
     }
 }
 
 /// Incrementally remove a piece feature from the accumulator.
 #[inline]
-pub fn accumulator_remove(acc: &mut Accumulator, piece: Piece, color: Color, sq: u8) {
+pub fn accumulator_remove(acc: &mut Accumulator, piece: Piece, color: Color, sq: u8, white_king: u8, black_king: u8) {
     let w = weights();
-    let wi = feature_index_white(piece, color, sq);
-    let bi = feature_index_black(piece, color, sq);
-    for j in 0..L1_SIZE {
-        acc.white[j] -= w.l1_weights[wi][j];
-        acc.black[j] -= w.l1_weights[bi][j];
+    if w.version == 1 {
+        let wi = feature_index_white(piece, color, sq);
+        let bi = feature_index_black(piece, color, sq);
+        for j in 0..L1_SIZE {
+            acc.white[j] -= w.l1_weights[wi][j];
+            acc.black[j] -= w.l1_weights[bi][j];
+        }
+    } else {
+        if piece == Piece::King { return; }
+        let wi = feature_index_halfkp_white(piece, color, sq, white_king);
+        let bi = feature_index_halfkp_black(piece, color, sq, black_king);
+        for j in 0..L1_SIZE {
+            acc.white[j] -= w.l1_weights[wi][j];
+            acc.black[j] -= w.l1_weights[bi][j];
+        }
     }
 }
 
 /// Incrementally move a piece (remove from `from`, add to `to`).
 #[inline]
-pub fn accumulator_move(acc: &mut Accumulator, piece: Piece, color: Color, from: u8, to: u8) {
+pub fn accumulator_move(acc: &mut Accumulator, piece: Piece, color: Color, from: u8, to: u8, white_king: u8, black_king: u8) {
     let w = weights();
-    let wi_from = feature_index_white(piece, color, from);
-    let wi_to   = feature_index_white(piece, color, to);
-    let bi_from = feature_index_black(piece, color, from);
-    let bi_to   = feature_index_black(piece, color, to);
-    for j in 0..L1_SIZE {
-        acc.white[j] += w.l1_weights[wi_to][j] - w.l1_weights[wi_from][j];
-        acc.black[j] += w.l1_weights[bi_to][j] - w.l1_weights[bi_from][j];
+    if w.version == 1 {
+        let wi_from = feature_index_white(piece, color, from);
+        let wi_to   = feature_index_white(piece, color, to);
+        let bi_from = feature_index_black(piece, color, from);
+        let bi_to   = feature_index_black(piece, color, to);
+        for j in 0..L1_SIZE {
+            acc.white[j] += w.l1_weights[wi_to][j] - w.l1_weights[wi_from][j];
+            acc.black[j] += w.l1_weights[bi_to][j] - w.l1_weights[bi_from][j];
+        }
+    } else {
+        // For HalfKP skip king features
+        if piece == Piece::King { return; }
+        let wi_from = feature_index_halfkp_white(piece, color, from, white_king);
+        let wi_to   = feature_index_halfkp_white(piece, color, to, white_king);
+        let bi_from = feature_index_halfkp_black(piece, color, from, black_king);
+        let bi_to   = feature_index_halfkp_black(piece, color, to, black_king);
+        for j in 0..L1_SIZE {
+            acc.white[j] += w.l1_weights[wi_to][j] - w.l1_weights[wi_from][j];
+            acc.black[j] += w.l1_weights[bi_to][j] - w.l1_weights[bi_from][j];
+        }
     }
 }
 
