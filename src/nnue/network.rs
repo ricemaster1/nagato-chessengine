@@ -2,6 +2,7 @@
 
 use crate::bitboard::Color;
 use crate::board::Board;
+use crate::nnue::features::{KING_BUCKETS, PER_BUCKET_FEATURES};
 
 use super::{L1_SIZE, L2_SIZE, INPUT_SIZE};
 use super::accumulator::Accumulator;
@@ -17,6 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct NnueWeights {
     /// Layer 1 weights: INPUT_SIZE × L1_SIZE (feature transform, shared for both perspectives)
     pub l1_weights: Vec<[f32; L1_SIZE]>, // indexed by [feature_idx][hidden_idx]
+    /// Weight file version (1 = legacy, 2 = HalfKP)
+    pub version: u32,
     /// Layer 1 biases: L1_SIZE
     pub l1_biases: [f32; L1_SIZE],
     /// Layer 2 weights: (2 * L1_SIZE) × L2_SIZE
@@ -119,14 +122,22 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
     cursor = 4;
 
     // Version
-    let version = read_u32(&mut cursor, data)?;
-    if version != 1 {
+        let version = read_u32(&mut cursor, data)?;
+        if version != 1 && version != 2 {
         return Err(format!("unsupported version: {}", version));
     }
 
     // L1 weights: INPUT_SIZE rows × L1_SIZE columns
-    let mut l1_weights = vec![[0.0f32; L1_SIZE]; INPUT_SIZE];
-    for i in 0..INPUT_SIZE {
+        // L1 weights: number of feature rows depends on version
+        let l1_rows = if version == 1 {
+            // legacy
+            super::INPUT_SIZE
+        } else {
+            // version 2: HalfKP
+            KING_BUCKETS * PER_BUCKET_FEATURES
+        };
+        let mut l1_weights = vec![[0.0f32; L1_SIZE]; l1_rows];
+        for i in 0..l1_rows {
         for j in 0..L1_SIZE {
             l1_weights[i][j] = read_f32(&mut cursor, data)?;
         }
@@ -164,24 +175,25 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
 
     // Verify we consumed the right amount
     let expected = 4 + 4 // magic + version
-        + (INPUT_SIZE * L1_SIZE) * 4  // l1 weights
-        + L1_SIZE * 4                  // l1 biases
+        + (l1_rows * L1_SIZE) * 4  // l1 weights
+        + L1_SIZE * 4              // l1 biases
         + (concat_size * L2_SIZE) * 4  // l2 weights
-        + L2_SIZE * 4                  // l2 biases
-        + L2_SIZE * 4                  // output weights
-        + 4;                           // output bias
+        + L2_SIZE * 4             // l2 biases
+        + L2_SIZE * 4             // output weights
+        + 4;                      // output bias
     if cursor != expected {
         return Err(format!("size mismatch: read {} expected {}", cursor, expected));
     }
 
-    Ok(NnueWeights {
-        l1_weights,
-        l1_biases,
-        l2_weights,
-        l2_biases,
-        output_weights,
-        output_bias,
-    })
+        Ok(NnueWeights {
+            version,
+            l1_weights,
+            l1_biases,
+            l2_weights,
+            l2_biases,
+            output_weights,
+            output_bias,
+        })
 }
 
 // ============================================================
