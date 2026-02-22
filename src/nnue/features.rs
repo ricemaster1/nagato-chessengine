@@ -8,6 +8,52 @@ use crate::bitboard::*;
 
 use super::INPUT_SIZE;
 
+/// Number of king buckets used by the planned king-relative feature encoding.
+/// We start with a compact mapping of 10 buckets (center, edges, corners, etc.).
+pub const KING_BUCKETS: usize = 10;
+
+/// Map a king square (0..63) to a king-bucket index (0..KING_BUCKETS-1).
+/// This mapping uses horizontal mirroring: if the king is on files e..h
+/// (4..7) we mirror the file so symmetric squares share the same bucket.
+#[inline]
+pub fn king_bucket_of(sq: u8) -> usize {
+    // File (0..7) and rank (0..7)
+    let file = sq & 7;
+    let rank = sq >> 3;
+
+    // Mirror horizontally so files 4..7 map to 3..0
+    let file_m = if file >= 4 { 7 - file } else { file };
+
+    // Simple handcrafted partition into 10 zones. The goal is compactness
+    // and to separate center/castled/corner-like locations.
+    // bucket 0: center 3x3 (files 2..4, ranks 2..4) -> after mirroring files 2..3
+    if file_m >= 2 && file_m <= 3 && rank >= 2 && rank <= 4 {
+        return 0;
+    }
+    // bucket 1: near-center ring
+    if file_m >= 1 && file_m <= 4 && rank >= 1 && rank <= 6 {
+        return 1;
+    }
+    // bucket 2: kingside (mirrored) near edges
+    if file_m >= 3 && rank >= 2 && rank <= 5 {
+        return 2;
+    }
+    // bucket 3: first rank (castled-ish)
+    if rank == 0 { return 3; }
+    // bucket 4: second rank
+    if rank == 1 { return 4; }
+    // bucket 5: seventh rank
+    if rank == 6 { return 5; }
+    // bucket 6: eighth rank
+    if rank == 7 { return 6; }
+    // bucket 7: queenside near corners
+    if file_m <= 1 && (rank <= 2 || rank >= 5) { return 7; }
+    // bucket 8: far edges
+    if file_m >= 4 || rank <= 0 || rank >= 7 { return 8; }
+    // fallback bucket 9: everything else
+    9
+}
+
 /// Compute the feature index for a piece on a square from white's perspective.
 ///
 /// White pieces: piece * 64 + sq
@@ -67,5 +113,22 @@ mod tests {
         let w_idx = feature_index_white(Piece::Pawn, Color::White, sq::E2);
         let b_idx = feature_index_black(Piece::Pawn, Color::Black, sq::E7);
         assert_eq!(w_idx, b_idx, "Symmetric positions should have same feature index");
+    }
+
+    #[test]
+    fn test_king_bucket_mapping() {
+        // Center square e4 should be in bucket 0 (center)
+        assert_eq!(king_bucket_of(sq::E4), 0);
+
+        // Corner / first-rank castled-like squares map to rank-based buckets
+        assert_eq!(king_bucket_of(sq::H1), 3);
+        assert_eq!(king_bucket_of(sq::A1), 3);
+
+        // Top rank squares map to bucket 6
+        assert_eq!(king_bucket_of(sq::E8), 6);
+
+        // A square far from center on queenside should map to a non-center bucket
+        let b = king_bucket_of(sq::A7);
+        assert!(b < KING_BUCKETS);
     }
 }
