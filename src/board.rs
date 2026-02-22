@@ -466,48 +466,51 @@ impl Board {
 
         // NNUE accumulator incremental update
         if nnue_active {
+            // compute king squares after the board update, before borrowing accumulator
+            let white_king_sq = self.king_sq(Color::White);
+            let black_king_sq = self.king_sq(Color::Black);
             let acc = &mut self.accumulator;
             match m.flags() {
                 FLAG_QUIET | FLAG_DOUBLE_PAWN => {
-                    nnue::accumulator_move(acc, piece, us, from, to);
+                    nnue::accumulator_move(acc, piece, us, from, to, white_king_sq, black_king_sq);
                 }
                 FLAG_KING_CASTLE => {
-                    nnue::accumulator_move(acc, Piece::King, us, from, to);
+                    nnue::accumulator_move(acc, Piece::King, us, from, to, white_king_sq, black_king_sq);
                     let (rook_from, rook_to) = match us {
                         Color::White => (sq::H1, sq::F1),
                         Color::Black => (sq::H8, sq::F8),
                     };
-                    nnue::accumulator_move(acc, Piece::Rook, us, rook_from, rook_to);
+                    nnue::accumulator_move(acc, Piece::Rook, us, rook_from, rook_to, white_king_sq, black_king_sq);
                 }
                 FLAG_QUEEN_CASTLE => {
-                    nnue::accumulator_move(acc, Piece::King, us, from, to);
+                    nnue::accumulator_move(acc, Piece::King, us, from, to, white_king_sq, black_king_sq);
                     let (rook_from, rook_to) = match us {
                         Color::White => (sq::A1, sq::D1),
                         Color::Black => (sq::A8, sq::D8),
                     };
-                    nnue::accumulator_move(acc, Piece::Rook, us, rook_from, rook_to);
+                    nnue::accumulator_move(acc, Piece::Rook, us, rook_from, rook_to, white_king_sq, black_king_sq);
                 }
                 FLAG_CAPTURE => {
                     let cap = captured.unwrap();
-                    nnue::accumulator_remove(acc, cap, them, to);
-                    nnue::accumulator_move(acc, piece, us, from, to);
+                    nnue::accumulator_remove(acc, cap, them, to, white_king_sq, black_king_sq);
+                    nnue::accumulator_move(acc, piece, us, from, to, white_king_sq, black_king_sq);
                 }
                 FLAG_EP_CAPTURE => {
                     let cap_sq = match us {
                         Color::White => to - 8,
                         Color::Black => to + 8,
                     };
-                    nnue::accumulator_remove(acc, Piece::Pawn, them, cap_sq);
-                    nnue::accumulator_move(acc, Piece::Pawn, us, from, to);
+                    nnue::accumulator_remove(acc, Piece::Pawn, them, cap_sq, white_king_sq, black_king_sq);
+                    nnue::accumulator_move(acc, Piece::Pawn, us, from, to, white_king_sq, black_king_sq);
                 }
                 _ if m.is_promotion() => {
                     let promo = m.promotion_piece().unwrap();
-                    nnue::accumulator_remove(acc, Piece::Pawn, us, from);
+                    nnue::accumulator_remove(acc, Piece::Pawn, us, from, white_king_sq, black_king_sq);
                     if m.is_capture() {
                         let cap = captured.unwrap();
-                        nnue::accumulator_remove(acc, cap, them, to);
+                        nnue::accumulator_remove(acc, cap, them, to, white_king_sq, black_king_sq);
                     }
-                    nnue::accumulator_add(acc, promo, us, to);
+                    nnue::accumulator_add(acc, promo, us, to, white_king_sq, black_king_sq);
                 }
                 _ => {}
             }
