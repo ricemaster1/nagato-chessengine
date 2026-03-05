@@ -280,4 +280,69 @@ mod tests {
         buf.extend_from_slice(&[0u8; 16]);
         assert!(load_weights_from_bytes(&buf).is_err());
     }
+
+    fn make_synthetic_weights(version: u32) -> NnueWeights {
+        let l1_rows = if version == 1 { INPUT_SIZE } else { KING_BUCKETS * PER_BUCKET_FEATURES };
+        let concat = 2 * L1_SIZE;
+        NnueWeights {
+            version,
+            l1_weights: vec![[0.01f32; L1_SIZE]; l1_rows],
+            l1_biases: [0.0f32; L1_SIZE],
+            l2_weights: vec![[0.01f32; L2_SIZE]; concat],
+            l2_biases: [0.0f32; L2_SIZE],
+            output_weights: [0.01f32; L2_SIZE],
+            output_bias: 0.0,
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_forward_pass() {
+        use std::time::Instant;
+        let w = make_synthetic_weights(1);
+        let _ = NNUE_STATE.set(w);
+        NNUE_LOADED.store(true, Ordering::Relaxed);
+
+        let mut acc = Accumulator::new();
+        acc.white = [0.5; L1_SIZE];
+        acc.black = [0.3; L1_SIZE];
+
+        let iterations = 1_000_000;
+        let start = Instant::now();
+        let mut sum = 0i64;
+        for _ in 0..iterations {
+            sum += forward(&acc, Color::White) as i64;
+        }
+        let elapsed = start.elapsed();
+        let ns_per = elapsed.as_nanos() as f64 / iterations as f64;
+        println!("forward: {} iterations in {:.2?} ({:.0} ns/iter, {:.1} M evals/s) [sum={}]",
+            iterations, elapsed, ns_per, 1e9 / ns_per / 1e6, sum);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_refresh_accumulator() {
+        use std::time::Instant;
+        use crate::board::Board;
+
+        crate::zobrist::init();
+        crate::movegen::init();
+
+        let w = make_synthetic_weights(1);
+        let _ = NNUE_STATE.set(w);
+        NNUE_LOADED.store(true, Ordering::Relaxed);
+
+        let board = Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1").unwrap();
+        let mut acc = Accumulator::new();
+
+        let iterations = 500_000;
+        let start = Instant::now();
+        for _ in 0..iterations {
+            crate::nnue::accumulator::refresh_accumulator(&board, &mut acc);
+        }
+        let elapsed = start.elapsed();
+        let ns_per = elapsed.as_nanos() as f64 / iterations as f64;
+        println!("refresh_accumulator: {} iterations in {:.2?} ({:.0} ns/iter, {:.1}K refreshes/s)",
+            iterations, elapsed, ns_per, 1e9 / ns_per / 1e3);
+    }
 }
