@@ -1,6 +1,3 @@
-/// Evaluation function.
-/// Uses piece-square tables with tapered evaluation (midgame → endgame interpolation).
-
 use crate::bitboard::*;
 use crate::board::Board;
 use crate::movegen;
@@ -297,7 +294,6 @@ fn eval_mobility(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
         let our_occ = board.occupancy[color];
         let all_occ = board.all_occupancy;
 
-        // Knight mobility
         let mut knights = board.pieces[color][Piece::Knight.index()];
         while knights != 0 {
             let sq = pop_lsb(&mut knights);
@@ -306,7 +302,6 @@ fn eval_mobility(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
             eg[color] += (moves - 4) * 3;
         }
 
-        // Bishop mobility
         let mut bishops = board.pieces[color][Piece::Bishop.index()];
         while bishops != 0 {
             let sq = pop_lsb(&mut bishops);
@@ -315,7 +310,6 @@ fn eval_mobility(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
             eg[color] += (moves - 6) * 3;
         }
 
-        // Rook mobility
         let mut rooks = board.pieces[color][Piece::Rook.index()];
         while rooks != 0 {
             let sq = pop_lsb(&mut rooks);
@@ -324,7 +318,6 @@ fn eval_mobility(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
             eg[color] += (moves - 7) * 3;
         }
 
-        // Queen mobility (smaller bonus to avoid overvaluing early queen moves)
         let mut queens = board.pieces[color][Piece::Queen.index()];
         while queens != 0 {
             let sq = pop_lsb(&mut queens);
@@ -341,7 +334,6 @@ fn eval_king_safety(board: &Board, mg: &mut [i32; 2], _eg: &mut [i32; 2]) {
         let king_file = file_of(king_sq) as usize;
         let our_pawns = board.pieces[color][Piece::Pawn.index()];
 
-        // Pawn shield bonus (for kings on the flanks in the midgame)
         if king_file <= 2 || king_file >= 5 {
             let shield_files: Vec<usize> = match king_file {
                 0 => vec![0, 1, 2],
@@ -489,30 +481,25 @@ pub fn see(board: &Board, m: Move) -> i32 {
     let mut gain = [0i32; 32];
     let mut d: usize = 0;
 
-    // Initial capture gain
     gain[0] = if m.is_en_passant() {
         PAWN_VALUE
     } else {
         PIECE_VALUES[m.captured_piece().index()]
     };
 
-    // If promoting, add the promotion bonus
     if m.is_promotion() {
         gain[0] += PIECE_VALUES[m.promotion_piece().unwrap().index()] - PAWN_VALUE;
     }
 
-    // The value of the piece now sitting on the target square (what the opponent can win back)
     let mut piece_on_target = if m.is_promotion() {
         PIECE_VALUES[m.promotion_piece().unwrap().index()]
     } else {
         PIECE_VALUES[m.piece().index()]
     };
 
-    // Working copy of occupancy — remove the initial attacker
     let mut occ = board.all_occupancy;
     occ ^= square_bb(from);
 
-    // For en passant, also remove the captured pawn from occupancy
     if m.is_en_passant() {
         let ep_cap_sq = match board.side {
             Color::White => to - 8,
@@ -521,7 +508,6 @@ pub fn see(board: &Board, m: Move) -> i32 {
         occ ^= square_bb(ep_cap_sq);
     }
 
-    // Side making the *next* capture (opponent of the initial mover)
     let mut side = board.side.flip();
 
     loop {
@@ -530,34 +516,24 @@ pub fn see(board: &Board, m: Move) -> i32 {
             break;
         }
 
-        // Find the least valuable attacker of `to` by `side`
         let (attacker_sq, piece) = match least_valuable_attacker(board, to, side, occ) {
             Some(result) => result,
             None => break, // No more attackers — exchange ends
         };
 
-        // Speculative gain: if we capture the piece on the target, we get piece_on_target
-        // but we give up what our opponent gained so far
         gain[d] = piece_on_target - gain[d - 1];
 
-        // Pruning: if even the best case can't improve for the side to move,
-        // this capture would never be made
         if (-gain[d - 1]).max(gain[d]) < 0 {
             break;
         }
 
-        // The piece now on the target square is the one that just captured
         piece_on_target = PIECE_VALUES[piece.index()];
 
-        // Remove this attacker from occupancy (opens x-ray lines for sliding pieces)
         occ ^= square_bb(attacker_sq);
 
-        // Flip side
         side = side.flip();
     }
 
-    // Propagate the gain stack back: each side chooses whether to capture
-    // or stand pat, whichever is better (negamax-style)
     while d > 1 {
         d -= 1;
         gain[d - 1] = -((-gain[d - 1]).max(gain[d]));
@@ -566,44 +542,36 @@ pub fn see(board: &Board, m: Move) -> i32 {
     gain[0]
 }
 
-/// Find the least valuable piece of `side` that attacks `sq` given `occ`.
-/// Returns (attacker_square, piece_type) or None.
 fn least_valuable_attacker(board: &Board, sq: u8, side: Color, occ: Bitboard) -> Option<(u8, Piece)> {
     let si = side.index();
 
-    // Pawns (cheapest)
     let pawn_attackers = movegen::pawn_attacks(sq, side.flip()) & board.pieces[si][Piece::Pawn.index()] & occ;
     if pawn_attackers != 0 {
         return Some((lsb(pawn_attackers), Piece::Pawn));
     }
 
-    // Knights
     let knight_attackers = movegen::knight_attacks(sq) & board.pieces[si][Piece::Knight.index()] & occ;
     if knight_attackers != 0 {
         return Some((lsb(knight_attackers), Piece::Knight));
     }
 
-    // Bishops
     let bishop_attacks = movegen::bishop_attacks(sq, occ);
     let bishop_attackers = bishop_attacks & board.pieces[si][Piece::Bishop.index()] & occ;
     if bishop_attackers != 0 {
         return Some((lsb(bishop_attackers), Piece::Bishop));
     }
 
-    // Rooks
     let rook_attacks = movegen::rook_attacks(sq, occ);
     let rook_attackers = rook_attacks & board.pieces[si][Piece::Rook.index()] & occ;
     if rook_attackers != 0 {
         return Some((lsb(rook_attackers), Piece::Rook));
     }
 
-    // Queens (use both bishop + rook rays)
     let queen_attackers = (bishop_attacks | rook_attacks) & board.pieces[si][Piece::Queen.index()] & occ;
     if queen_attackers != 0 {
         return Some((lsb(queen_attackers), Piece::Queen));
     }
 
-    // King (most expensive — only if no other attacker)
     let king_attackers = movegen::king_attacks(sq) & board.pieces[si][Piece::King.index()] & occ;
     if king_attackers != 0 {
         return Some((lsb(king_attackers), Piece::King));
@@ -615,15 +583,14 @@ fn least_valuable_attacker(board: &Board, sq: u8, side: Color, occ: Bitboard) ->
 // ============================================================
 // MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
 // For move ordering in search
+// MVV-LVA score: higher = better capture to search first
 // ============================================================
 
-/// MVV-LVA score: higher = better capture to search first
 pub fn mvv_lva_score(m: Move) -> i32 {
     if !m.is_capture() {
         return 0;
     }
-    // Captured piece value * 10 - attacker piece value
-    // This ensures capturing expensive pieces with cheap ones is scored highest
+
     let victim_val = if m.is_en_passant() {
         PAWN_VALUE
     } else {
@@ -637,13 +604,11 @@ pub const INFINITY: i32 = 30000;
 pub const MATE_SCORE: i32 = 29000;
 pub const MATE_THRESHOLD: i32 = 28000;
 
-/// Is this score a mate score?
 #[inline]
 pub fn is_mate_score(score: i32) -> bool {
     score.abs() > MATE_THRESHOLD
 }
 
-/// Convert a mate score to "mate in N" moves
 pub fn mate_in(score: i32) -> i32 {
     if score > MATE_THRESHOLD {
         (MATE_SCORE - score + 1) / 2

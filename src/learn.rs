@@ -29,16 +29,10 @@ pub enum GameResult {
 /// A single piece of experience: what we learned about a position.
 #[derive(Clone, Copy, Debug)]
 pub struct ExpEntry {
-    /// Zobrist hash of the position
     pub hash: u64,
-    /// The best move we found last time
     pub best_move: Move,
-    /// Search depth at which we found it
     pub depth: i8,
-    /// The engine's evaluation (centipawns, from side-to-move)
     pub score: i16,
-    /// How the game actually ended: 1.0 = win, 0.5 = draw, 0.0 = loss
-    /// (from the perspective of the side to move in this position)
     pub game_result: f32,
     /// How many times we've seen this position across games
     pub count: u16,
@@ -172,14 +166,12 @@ impl ExpTable {
         let file = File::open(path)?;
         let mut r = BufReader::new(file);
 
-        // Check magic
         let mut magic = [0u8; 4];
         r.read_exact(&mut magic)?;
         if &magic != EXP_MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "not an experience file"));
         }
 
-        // Check version
         let mut ver = [0u8; 1];
         r.read_exact(&mut ver)?;
         if ver[0] != EXP_VERSION {
@@ -189,7 +181,6 @@ impl ExpTable {
             ));
         }
 
-        // Entry count
         let mut count_buf = [0u8; 4];
         r.read_exact(&mut count_buf)?;
         let count = u32::from_le_bytes(count_buf) as usize;
@@ -235,7 +226,6 @@ struct PositionRecord {
     best_move: Move,
     depth: i8,
     score: i16,
-    /// Which color was to move (0 = White, 1 = Black)
     side: u8,
 }
 

@@ -17,7 +17,6 @@ pub const SQUARE_NAMES: [&str; 64] = [
     "a8","b8","c8","d8","e8","f8","g8","h8",
 ];
 
-// Named square constants
 #[rustfmt::skip]
 pub mod sq {
     pub const A1: u8 = 0;  pub const B1: u8 = 1;  pub const C1: u8 = 2;  pub const D1: u8 = 3;
@@ -143,68 +142,57 @@ pub const COLOR_COUNT: usize = 2;
 // Bitboard utility functions
 // ============================================================
 
-/// Set a bit at the given square index
 #[inline]
 pub fn set_bit(bb: Bitboard, sq: u8) -> Bitboard {
     bb | (1u64 << sq)
 }
 
-/// Clear a bit at the given square index
 #[inline]
 pub fn clear_bit(bb: Bitboard, sq: u8) -> Bitboard {
     bb & !(1u64 << sq)
 }
 
-/// Toggle a bit at the given square index
 #[inline]
 pub fn toggle_bit(bb: Bitboard, sq: u8) -> Bitboard {
     bb ^ (1u64 << sq)
 }
 
-/// Check if a bit is set
 #[inline]
 pub fn get_bit(bb: Bitboard, sq: u8) -> bool {
     (bb >> sq) & 1 != 0
 }
 
-/// Bit mask for a single square
 #[inline]
 pub fn square_bb(sq: u8) -> Bitboard {
     1u64 << sq
 }
 
-/// Get the file (0-7) of a square
 #[inline]
 pub fn file_of(sq: u8) -> u8 {
     sq & 7
 }
 
-/// Get the rank (0-7) of a square
 #[inline]
 pub fn rank_of(sq: u8) -> u8 {
     sq >> 3
 }
 
-/// Make a square index from file and rank
 #[inline]
 pub fn make_square(file: u8, rank: u8) -> u8 {
     rank * 8 + file
 }
 
-/// Population count (number of set bits)
 #[inline]
 pub fn popcount(bb: Bitboard) -> u32 {
     bb.count_ones()
 }
 
-/// Least significant bit index
 #[inline]
 pub fn lsb(bb: Bitboard) -> u8 {
     debug_assert!(bb != 0);
     bb.trailing_zeros() as u8
 }
 
-/// Pop the least significant bit, returning its index
 #[inline]
 pub fn pop_lsb(bb: &mut Bitboard) -> u8 {
     let sq = lsb(*bb);
@@ -212,25 +200,21 @@ pub fn pop_lsb(bb: &mut Bitboard) -> u8 {
     sq
 }
 
-/// Shift a bitboard north (towards rank 8)
 #[inline]
 pub fn north(bb: Bitboard) -> Bitboard {
     bb << 8
 }
 
-/// Shift a bitboard south (towards rank 1)
 #[inline]
 pub fn south(bb: Bitboard) -> Bitboard {
     bb >> 8
 }
 
-/// Shift east (towards H file)
 #[inline]
 pub fn east(bb: Bitboard) -> Bitboard {
     (bb << 1) & NOT_FILE_A
 }
 
-/// Shift west (towards A file)
 #[inline]
 pub fn west(bb: Bitboard) -> Bitboard {
     (bb >> 1) & NOT_FILE_H
@@ -256,7 +240,6 @@ pub fn south_west(bb: Bitboard) -> Bitboard {
     (bb >> 9) & NOT_FILE_H
 }
 
-/// Pretty-print a bitboard for debugging
 pub fn print_bitboard(bb: Bitboard) {
     println!();
     for rank in (0..8).rev() {
@@ -275,7 +258,6 @@ pub fn print_bitboard(bb: Bitboard) {
     println!("    Hex: 0x{:016X}", bb);
 }
 
-/// Parse square name (e.g., "e4") to square index
 pub fn parse_square(s: &str) -> Option<u8> {
     let bytes = s.as_bytes();
     if bytes.len() != 2 {
@@ -290,7 +272,6 @@ pub fn parse_square(s: &str) -> Option<u8> {
     }
 }
 
-/// Square index to string name
 pub fn square_name(sq: u8) -> &'static str {
     SQUARE_NAMES[sq as usize]
 }

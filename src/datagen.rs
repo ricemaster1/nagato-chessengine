@@ -34,11 +34,7 @@ use crate::movegen;
 use crate::moves::*;
 use crate::search;
 use std::io::Write;
-
-/// Size of each training entry in bytes
 pub const ENTRY_SIZE: usize = 40;
-
-/// Pack a board position into the 32-byte piece-list format.
 fn pack_board(board: &Board) -> [u8; 32] {
     let mut packed = [0u8; 32];
     for sq in 0..64u8 {
@@ -68,8 +64,6 @@ fn pack_board(board: &Board) -> [u8; 32] {
     }
     packed
 }
-
-/// Unpack a 32-byte piece list back to a Board (for verification).
 pub fn unpack_board(packed: &[u8; 32], side: Color, castling: u8, ep_file: u8) -> Board {
     let mut board = Board::empty();
     for sq in 0..64u8 {
@@ -111,8 +105,6 @@ pub fn unpack_board(packed: &[u8; 32], side: Color, castling: u8, ep_file: u8) -
     board.hash = board.compute_hash();
     board
 }
-
-/// Write a single training entry to the output buffer.
 fn write_entry(buf: &mut Vec<u8>, board: &Board, score_white: i16, result: i8) {
     let packed = pack_board(board);
     buf.extend_from_slice(&packed);  // 32 bytes
@@ -125,14 +117,6 @@ fn write_entry(buf: &mut Vec<u8>, board: &Board, score_white: i16, result: i8) {
     buf.push(0);                      // padding
     debug_assert_eq!(buf.len() % ENTRY_SIZE, 0);
 }
-
-/// Run data generation: self-play games with the HCE, recording positions.
-///
-/// Parameters:
-/// - `num_games`: number of self-play games to generate
-/// - `depth`: search depth for scoring positions
-/// - `output_path`: path to write the binary training data
-/// - `random_plies`: number of random opening plies (for position diversity)
 pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32) {
     use rand::Rng;
 
@@ -152,16 +136,12 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
         let mut board = Board::start_pos();
         let mut positions: Vec<(Board, i16)> = Vec::new();
         let mut ply = 0u32;
-
-        // Play random opening moves for diversity
         for _ in 0..random_plies {
             let mut list = MoveList::new();
             movegen::generate_moves(&board, &mut list);
             if list.len() == 0 {
                 break;
             }
-
-            // Try random legal moves
             let mut made = false;
             for _ in 0..10 {
                 let idx = rng.gen_range(0..list.len());
@@ -176,17 +156,12 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
                 break;
             }
         }
-
-        // Play the actual game with search
         let mut result: i8 = 0; // 0 = draw
         let mut consecutive_no_progress = 0u32;
 
         loop {
-            // Check for game-ending conditions
             let mut list = MoveList::new();
             movegen::generate_moves(&board, &mut list);
-
-            // Check if any move is legal
             let mut has_legal = false;
             let mut temp = board.clone();
             for i in 0..list.len() {
@@ -200,34 +175,24 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
 
             if !has_legal {
                 if board.in_check() {
-                    // Checkmate
                     result = match board.side {
                         Color::White => -1, // Black wins
                         Color::Black => 1,  // White wins
                     };
                 }
-                // else stalemate = draw (result stays 0)
                 break;
             }
-
-            // 50-move rule
             if board.halfmove >= 100 {
                 result = 0;
                 break;
             }
-
-            // Adjudication: too many moves
             if ply > 400 {
                 result = 0;
                 break;
             }
-
-            // Search the position
             tt.clear();
             let search_result = search::search(&mut board, &mut tt, &exp, 0, depth);
             let score = search_result.score;
-
-            // Adjudicate large scores as wins
             if score.abs() > eval::MATE_THRESHOLD {
                 if score > 0 {
                     result = match board.side {
@@ -242,8 +207,6 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
                 }
                 break;
             }
-
-            // Adjudicate large eval advantages after enough plies
             if ply > 40 && score.abs() > 1000 {
                 consecutive_no_progress += 1;
                 if consecutive_no_progress > 5 {
@@ -263,19 +226,13 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
             } else {
                 consecutive_no_progress = 0;
             }
-
-            // Record the position if not in check and not a capture
-            // (quiet positions are better for training)
             if !board.in_check() && score.abs() < 5000 {
-                // Convert score to white's perspective
                 let score_white = match board.side {
                     Color::White => score as i16,
                     Color::Black => -score as i16,
                 };
                 positions.push((board.clone(), score_white));
             }
-
-            // Make the best move
             let best_move = search_result.best_move;
             if best_move == MOVE_NONE {
                 break;
@@ -283,16 +240,12 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
             board.make_move(best_move);
             ply += 1;
         }
-
-        // Write all positions from this game with the game result
         for (pos, score) in &positions {
             write_entry(&mut buf, pos, *score, result);
             total_positions += 1;
         }
 
         total_games += 1;
-
-        // Progress update every 10 games
         if (game_idx + 1) % 10 == 0 {
             let elapsed = start_time.elapsed().as_secs();
             let games_per_sec = if elapsed > 0 { total_games as f64 / elapsed as f64 } else { 0.0 };
@@ -301,14 +254,10 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
                 total_games, num_games, total_positions, games_per_sec
             );
         }
-
-        // Flush to disk periodically (every 100 games)
         if total_games % 100 == 0 && !buf.is_empty() {
             flush_buf(&mut buf, output_path, total_games == 100);
         }
     }
-
-    // Final flush
     if !buf.is_empty() {
         flush_buf(&mut buf, output_path, total_games <= 100);
     }
@@ -358,8 +307,6 @@ mod tests {
         let packed = pack_board(&board);
         let restored = unpack_board(&packed, board.side, board.castling,
             board.ep_square.map_or(255, |sq| file_of(sq)));
-
-        // Verify all pieces match
         for sq in 0..64u8 {
             assert_eq!(board.piece_at(sq), restored.piece_at(sq),
                 "Mismatch at square {}", SQUARE_NAMES[sq as usize]);

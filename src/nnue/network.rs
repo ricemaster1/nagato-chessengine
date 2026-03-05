@@ -1,5 +1,3 @@
-//! NNUE network weights, loading, and forward pass.
-
 use crate::bitboard::Color;
 use crate::board::Board;
 use crate::nnue::features::{KING_BUCKETS, PER_BUCKET_FEATURES};
@@ -10,36 +8,19 @@ use super::accumulator::Accumulator;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// ============================================================
-// Network weights
-// ============================================================
-
-/// The NNUE network weights, loaded from a binary file.
 pub struct NnueWeights {
-    /// Layer 1 weights: INPUT_SIZE × L1_SIZE (feature transform, shared for both perspectives)
-    pub l1_weights: Vec<[f32; L1_SIZE]>, // indexed by [feature_idx][hidden_idx]
-    /// Weight file version (1 = legacy, 2 = HalfKP)
+    pub l1_weights: Vec<[f32; L1_SIZE]>,
     pub version: u32,
-    /// Layer 1 biases: L1_SIZE
     pub l1_biases: [f32; L1_SIZE],
-    /// Layer 2 weights: (2 * L1_SIZE) × L2_SIZE
-    pub l2_weights: Vec<[f32; L2_SIZE]>, // indexed by [concat_idx][l2_idx]
-    /// Layer 2 biases: L2_SIZE
+    pub l2_weights: Vec<[f32; L2_SIZE]>,
     pub l2_biases: [f32; L2_SIZE],
-    /// Output weights: L2_SIZE → 1
     pub output_weights: [f32; L2_SIZE],
-    /// Output bias
     pub output_bias: f32,
 }
-
-// ============================================================
-// Global state
-// ============================================================
 
 static NNUE_STATE: OnceLock<NnueWeights> = OnceLock::new();
 static NNUE_LOADED: AtomicBool = AtomicBool::new(false);
 
-/// Initialize NNUE from nn.bin. Call once at startup.
 pub fn init() {
     let path = std::path::Path::new("nn.bin");
     if path.exists() {
@@ -58,31 +39,16 @@ pub fn init() {
     }
 }
 
-/// Check if NNUE is loaded and active.
 #[inline]
 pub fn is_active() -> bool {
     NNUE_LOADED.load(Ordering::Relaxed)
 }
 
-/// Get a reference to the loaded weights (panics if not loaded).
 #[inline]
 pub(super) fn weights() -> &'static NnueWeights {
     NNUE_STATE.get().unwrap()
 }
 
-// ============================================================
-// Weight loading — binary format
-// ============================================================
-
-/// Binary format (little-endian f32):
-///   - Magic: b"NAGT" (4 bytes)
-///   - Version: u32 (4 bytes)
-///   - L1 weights: INPUT_SIZE * L1_SIZE floats
-///   - L1 biases: L1_SIZE floats
-///   - L2 weights: (2 * L1_SIZE) * L2_SIZE floats
-///   - L2 biases: L2_SIZE floats
-///   - Output weights: L2_SIZE floats
-///   - Output bias: 1 float
 pub fn load_weights_from_file(path: &std::path::Path) -> Result<NnueWeights, String> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).map_err(|e| format!("open: {}", e))?;
@@ -112,7 +78,6 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
         Ok(val)
     };
 
-    // Magic
     if data.len() < 8 {
         return Err("file too small".into());
     }
@@ -121,35 +86,28 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
     }
     cursor = 4;
 
-    // Version
-        let version = read_u32(&mut cursor, data)?;
-        if version != 1 && version != 2 {
+    let version = read_u32(&mut cursor, data)?;
+    if version != 1 && version != 2 {
         return Err(format!("unsupported version: {}", version));
     }
 
-    // L1 weights: INPUT_SIZE rows × L1_SIZE columns
-        // L1 weights: number of feature rows depends on version
-        let l1_rows = if version == 1 {
-            // legacy
-            super::INPUT_SIZE
-        } else {
-            // version 2: HalfKP
-            KING_BUCKETS * PER_BUCKET_FEATURES
-        };
-        let mut l1_weights = vec![[0.0f32; L1_SIZE]; l1_rows];
-        for i in 0..l1_rows {
+    let l1_rows = if version == 1 {
+        super::INPUT_SIZE
+    } else {
+        KING_BUCKETS * PER_BUCKET_FEATURES
+    };
+    let mut l1_weights = vec![[0.0f32; L1_SIZE]; l1_rows];
+    for i in 0..l1_rows {
         for j in 0..L1_SIZE {
             l1_weights[i][j] = read_f32(&mut cursor, data)?;
         }
     }
 
-    // L1 biases
     let mut l1_biases = [0.0f32; L1_SIZE];
     for j in 0..L1_SIZE {
         l1_biases[j] = read_f32(&mut cursor, data)?;
     }
 
-    // L2 weights: (2 * L1_SIZE) rows × L2_SIZE columns
     let concat_size = 2 * L1_SIZE;
     let mut l2_weights = vec![[0.0f32; L2_SIZE]; concat_size];
     for i in 0..concat_size {
@@ -158,71 +116,55 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
         }
     }
 
-    // L2 biases
     let mut l2_biases = [0.0f32; L2_SIZE];
     for j in 0..L2_SIZE {
         l2_biases[j] = read_f32(&mut cursor, data)?;
     }
 
-    // Output weights
     let mut output_weights = [0.0f32; L2_SIZE];
     for j in 0..L2_SIZE {
         output_weights[j] = read_f32(&mut cursor, data)?;
     }
 
-    // Output bias
     let output_bias = read_f32(&mut cursor, data)?;
 
-    // Verify we consumed the right amount
-    let expected = 4 + 4 // magic + version
-        + (l1_rows * L1_SIZE) * 4  // l1 weights
-        + L1_SIZE * 4              // l1 biases
-        + (concat_size * L2_SIZE) * 4  // l2 weights
-        + L2_SIZE * 4             // l2 biases
-        + L2_SIZE * 4             // output weights
-        + 4;                      // output bias
+    let expected = 4 + 4
+        + (l1_rows * L1_SIZE) * 4
+        + L1_SIZE * 4
+        + (concat_size * L2_SIZE) * 4
+        + L2_SIZE * 4
+        + L2_SIZE * 4
+        + 4;
     if cursor != expected {
         return Err(format!("size mismatch: read {} expected {}", cursor, expected));
     }
 
-        Ok(NnueWeights {
-            version,
-            l1_weights,
-            l1_biases,
-            l2_weights,
-            l2_biases,
-            output_weights,
-            output_bias,
-        })
+    Ok(NnueWeights {
+        version,
+        l1_weights,
+        l1_biases,
+        l2_weights,
+        l2_biases,
+        output_weights,
+        output_bias,
+    })
 }
 
-// ============================================================
-// Forward pass
-// ============================================================
-
-/// ClippedReLU activation: clamp(x, 0, 1)
 #[inline]
 fn clipped_relu(x: f32) -> f32 {
     x.clamp(0.0, 1.0)
 }
 
-/// Run the forward pass from the accumulated layer-1 values.
-/// `side` is the side to move — determines which perspective goes first in the concat.
-///
-/// Returns the evaluation score in centipawns (from the side-to-move's perspective).
 pub fn forward(acc: &Accumulator, side: Color) -> i32 {
     let w = weights();
 
-    // Determine perspective order: STM first, then opponent
     let (stm_acc, opp_acc) = match side {
         Color::White => (&acc.white, &acc.black),
         Color::Black => (&acc.black, &acc.white),
     };
 
-    // Layer 2 input: ClippedReLU of [stm_accumulator | opp_accumulator]
     let mut l2_out = w.l2_biases;
 
-    // STM perspective (indices 0..L1_SIZE)
     for i in 0..L1_SIZE {
         let activated = clipped_relu(stm_acc[i]);
         if activated != 0.0 {
@@ -232,7 +174,6 @@ pub fn forward(acc: &Accumulator, side: Color) -> i32 {
         }
     }
 
-    // Opponent perspective (indices L1_SIZE..2*L1_SIZE)
     for i in 0..L1_SIZE {
         let activated = clipped_relu(opp_acc[i]);
         if activated != 0.0 {
@@ -242,30 +183,17 @@ pub fn forward(acc: &Accumulator, side: Color) -> i32 {
         }
     }
 
-    // Output layer: dot product with ClippedReLU of l2
     let mut output = w.output_bias;
     for j in 0..L2_SIZE {
         output += clipped_relu(l2_out[j]) * w.output_weights[j];
     }
 
-    // Scale to centipawns (the network outputs are trained in a [0,1]-ish range
-    // from the sigmoid — we scale by 400 to get centipawns)
     (output * 400.0) as i32
 }
 
-// ============================================================
-// High-level evaluation
-// ============================================================
-
-/// Evaluate the position using NNUE. Requires a pre-computed accumulator.
-/// Returns score in centipawns from the side-to-move's perspective.
 pub fn evaluate(board: &Board, acc: &Accumulator) -> i32 {
     forward(acc, board.side)
 }
-
-// ============================================================
-// Tests
-// ============================================================
 
 #[cfg(test)]
 mod tests {
@@ -282,17 +210,74 @@ mod tests {
 
     #[test]
     fn test_weight_file_size() {
-        // Verify expected binary file size
         let concat_size = 2 * L1_SIZE;
-        let expected_floats = INPUT_SIZE * L1_SIZE  // l1 weights
-            + L1_SIZE                               // l1 biases
-            + concat_size * L2_SIZE                 // l2 weights
-            + L2_SIZE                               // l2 biases
-            + L2_SIZE                               // output weights
-            + 1;                                    // output bias
-        let expected_bytes = 8 + expected_floats * 4; // 8 = magic + version
-        // 768*128 + 128 + 256*32 + 32 + 32 + 1 = 98_304 + 128 + 8_192 + 32 + 32 + 1 = 106_689 floats
-        // 8 + 106_689 * 4 = 426_764 bytes (~417 KB)
+        let expected_floats = INPUT_SIZE * L1_SIZE
+            + L1_SIZE
+            + concat_size * L2_SIZE
+            + L2_SIZE
+            + L2_SIZE
+            + 1;
+        let expected_bytes = 8 + expected_floats * 4;
         assert_eq!(expected_bytes, 426_764);
+    }
+
+    #[test]
+    fn test_load_v1_roundtrip() {
+        let l1_rows = INPUT_SIZE;
+        let concat = 2 * L1_SIZE;
+        let total_floats = l1_rows * L1_SIZE + L1_SIZE + concat * L2_SIZE + L2_SIZE + L2_SIZE + 1;
+        let mut buf: Vec<u8> = Vec::with_capacity(8 + total_floats * 4);
+        buf.extend_from_slice(b"NAGT");
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        for i in 0..total_floats {
+            buf.extend_from_slice(&(i as f32 * 0.001).to_le_bytes());
+        }
+        let w = load_weights_from_bytes(&buf).expect("v1 load failed");
+        assert_eq!(w.version, 1);
+        assert_eq!(w.l1_weights.len(), l1_rows);
+        assert_eq!(w.l2_weights.len(), concat);
+        let first_l1 = w.l1_weights[0][0];
+        assert!((first_l1 - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_load_v2_roundtrip() {
+        let l1_rows = KING_BUCKETS * PER_BUCKET_FEATURES;
+        let concat = 2 * L1_SIZE;
+        let total_floats = l1_rows * L1_SIZE + L1_SIZE + concat * L2_SIZE + L2_SIZE + L2_SIZE + 1;
+        let mut buf: Vec<u8> = Vec::with_capacity(8 + total_floats * 4);
+        buf.extend_from_slice(b"NAGT");
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        for i in 0..total_floats {
+            buf.extend_from_slice(&(i as f32 * 0.0001).to_le_bytes());
+        }
+        let w = load_weights_from_bytes(&buf).expect("v2 load failed");
+        assert_eq!(w.version, 2);
+        assert_eq!(w.l1_weights.len(), l1_rows);
+        assert_eq!(w.l2_weights.len(), concat);
+    }
+
+    #[test]
+    fn test_load_bad_magic() {
+        let mut buf = vec![0u8; 8];
+        buf[0..4].copy_from_slice(b"XXXX");
+        assert!(load_weights_from_bytes(&buf).is_err());
+    }
+
+    #[test]
+    fn test_load_bad_version() {
+        let mut buf = vec![0u8; 12];
+        buf[0..4].copy_from_slice(b"NAGT");
+        buf[4..8].copy_from_slice(&99u32.to_le_bytes());
+        assert!(load_weights_from_bytes(&buf).is_err());
+    }
+
+    #[test]
+    fn test_load_truncated() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"NAGT");
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 16]);
+        assert!(load_weights_from_bytes(&buf).is_err());
     }
 }

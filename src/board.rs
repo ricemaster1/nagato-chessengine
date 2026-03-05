@@ -1,19 +1,14 @@
-/// Board state representation using bitboards.
-/// Supports make/unmake move with an undo stack.
-
 use crate::bitboard::*;
 use crate::moves::*;
 use crate::nnue;
 use crate::zobrist;
 
-/// Castling rights encoded as 4 bits
-pub const WK_CASTLE: u8 = 0b0001; // White kingside
-pub const WQ_CASTLE: u8 = 0b0010; // White queenside
-pub const BK_CASTLE: u8 = 0b0100; // Black kingside
-pub const BQ_CASTLE: u8 = 0b1000; // Black queenside
+pub const WK_CASTLE: u8 = 0b0001;
+pub const WQ_CASTLE: u8 = 0b0010;
+pub const BK_CASTLE: u8 = 0b0100; 
+pub const BQ_CASTLE: u8 = 0b1000; 
 pub const ALL_CASTLES: u8 = 0b1111;
 
-/// Saved state for unmake_move
 #[derive(Clone, Copy)]
 pub struct UndoInfo {
     pub castling: u8,
@@ -23,43 +18,29 @@ pub struct UndoInfo {
     pub captured_piece: Option<Piece>,
 }
 
-/// The complete chess board state
 #[derive(Clone)]
 pub struct Board {
-    /// Bitboards for each piece type per color: pieces[color][piece]
     pub pieces: [[Bitboard; PIECE_COUNT]; COLOR_COUNT],
-    /// Combined occupancy per color
     pub occupancy: [Bitboard; COLOR_COUNT],
-    /// All occupied squares
     pub all_occupancy: Bitboard,
 
-    /// Side to move
     pub side: Color,
-    /// Castling rights
     pub castling: u8,
-    /// En passant target square (if any)
     pub ep_square: Option<u8>,
-    /// Halfmove clock (for 50-move rule)
     pub halfmove: u16,
-    /// Fullmove number
     pub fullmove: u16,
 
-    /// Zobrist hash of the current position
     pub hash: u64,
 
-    /// Undo stack
     pub history: Vec<UndoInfo>,
 
-    /// NNUE accumulator for the current position
     pub accumulator: nnue::Accumulator,
-    /// NNUE accumulator undo stack
     pub acc_history: Vec<nnue::Accumulator>,
 }
 
 pub const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 impl Board {
-    /// Create an empty board
     pub fn empty() -> Self {
         Board {
             pieces: [[0; PIECE_COUNT]; COLOR_COUNT],
@@ -77,12 +58,10 @@ impl Board {
         }
     }
 
-    /// Create a board from the starting position
     pub fn start_pos() -> Self {
         Self::from_fen(START_FEN).expect("Invalid start FEN")
     }
 
-    /// Parse a FEN string into a Board
     pub fn from_fen(fen: &str) -> Result<Self, String> {
         let mut board = Board::empty();
         let parts: Vec<&str> = fen.split_whitespace().collect();
@@ -90,7 +69,6 @@ impl Board {
             return Err("FEN must have at least 4 fields".into());
         }
 
-        // 1. Piece placement
         let mut rank: i8 = 7;
         let mut file: i8 = 0;
         for ch in parts[0].chars() {
@@ -112,14 +90,12 @@ impl Board {
             }
         }
 
-        // 2. Side to move
         board.side = match parts[1] {
             "w" => Color::White,
             "b" => Color::Black,
             _ => return Err("Invalid side to move".into()),
         };
 
-        // 3. Castling rights
         board.castling = 0;
         if parts[2] != "-" {
             for ch in parts[2].chars() {
@@ -133,31 +109,26 @@ impl Board {
             }
         }
 
-        // 4. En passant
         board.ep_square = if parts[3] == "-" {
             None
         } else {
             Some(parse_square(parts[3]).ok_or("Invalid en passant square")?)
         };
 
-        // 5. Halfmove clock (optional)
         board.halfmove = if parts.len() > 4 {
             parts[4].parse().unwrap_or(0)
         } else {
             0
         };
 
-        // 6. Fullmove number (optional)
         board.fullmove = if parts.len() > 5 {
             parts[5].parse().unwrap_or(1)
         } else {
             1
         };
 
-        // Compute hash
         board.hash = board.compute_hash();
 
-        // Refresh NNUE accumulator
         if nnue::is_active() {
             let mut acc = nnue::Accumulator::new();
             nnue::refresh_accumulator(&board, &mut acc);
@@ -167,11 +138,9 @@ impl Board {
         Ok(board)
     }
 
-    /// Convert board to FEN string
     pub fn to_fen(&self) -> String {
         let mut fen = String::new();
 
-        // Piece placement
         for rank in (0..8).rev() {
             let mut empty = 0;
             for file in 0..8 {
@@ -194,14 +163,12 @@ impl Board {
             }
         }
 
-        // Side to move
         fen.push(' ');
         fen.push(match self.side {
             Color::White => 'w',
             Color::Black => 'b',
         });
 
-        // Castling
         fen.push(' ');
         if self.castling == 0 {
             fen.push('-');
@@ -212,20 +179,17 @@ impl Board {
             if self.castling & BQ_CASTLE != 0 { fen.push('q'); }
         }
 
-        // En passant
         fen.push(' ');
         match self.ep_square {
             Some(sq) => fen.push_str(square_name(sq)),
             None => fen.push('-'),
         }
 
-        // Halfmove and fullmove
         fen.push_str(&format!(" {} {}", self.halfmove, self.fullmove));
 
         fen
     }
 
-    /// Place a piece on the board
     pub fn put_piece(&mut self, piece: Piece, color: Color, sq: u8) {
         let bb = square_bb(sq);
         self.pieces[color.index()][piece.index()] |= bb;
@@ -233,7 +197,6 @@ impl Board {
         self.all_occupancy |= bb;
     }
 
-    /// Remove a piece from the board
     pub fn remove_piece(&mut self, piece: Piece, color: Color, sq: u8) {
         let bb = square_bb(sq);
         self.pieces[color.index()][piece.index()] &= !bb;
@@ -241,7 +204,6 @@ impl Board {
         self.all_occupancy &= !bb;
     }
 
-    /// Move a piece from one square to another
     pub fn move_piece(&mut self, piece: Piece, color: Color, from: u8, to: u8) {
         let from_to = square_bb(from) | square_bb(to);
         self.pieces[color.index()][piece.index()] ^= from_to;
@@ -249,7 +211,6 @@ impl Board {
         self.all_occupancy ^= from_to;
     }
 
-    /// What piece (if any) is on a given square?
     pub fn piece_at(&self, sq: u8) -> Option<(Piece, Color)> {
         let bb = square_bb(sq);
         for color_idx in 0..COLOR_COUNT {
@@ -266,7 +227,6 @@ impl Board {
         None
     }
 
-    /// Find which piece type of a given color is on a square
     pub fn piece_on(&self, sq: u8, color: Color) -> Option<Piece> {
         let bb = square_bb(sq);
         if self.occupancy[color.index()] & bb == 0 {
@@ -280,12 +240,10 @@ impl Board {
         None
     }
 
-    /// Get the king square for a color
     pub fn king_sq(&self, color: Color) -> u8 {
         lsb(self.pieces[color.index()][Piece::King.index()])
     }
 
-    /// Compute the full Zobrist hash from scratch
     pub fn compute_hash(&self) -> u64 {
         let keys = zobrist::keys();
         let mut h: u64 = 0;
@@ -313,10 +271,8 @@ impl Board {
         h
     }
 
-    /// Table for updating castling rights when a piece moves from/to a square
     const CASTLE_MASK: [u8; 64] = {
         let mut mask = [ALL_CASTLES; 64];
-        // If rook or king moves from these squares, remove corresponding rights
         mask[sq::A1 as usize] &= !WQ_CASTLE;
         mask[sq::E1 as usize] &= !(WK_CASTLE | WQ_CASTLE);
         mask[sq::H1 as usize] &= !WK_CASTLE;
@@ -326,18 +282,14 @@ impl Board {
         mask
     };
 
-    /// Make a move on the board, returning true if the resulting position is legal
-    /// (i.e., the side that just moved is not in check)
     pub fn make_move(&mut self, m: Move) -> bool {
         let keys = zobrist::keys();
         let nnue_active = nnue::is_active();
 
-        // Save NNUE accumulator for undo
         if nnue_active {
             self.acc_history.push(self.accumulator.clone());
         }
 
-        // Save undo info
         let captured = if m.is_capture() && !m.is_en_passant() {
             self.piece_on(m.to_sq(), self.side.flip())
         } else {
@@ -359,18 +311,14 @@ impl Board {
         let us = self.side;
         let them = us.flip();
 
-        // Remove en passant from hash
         if let Some(ep) = self.ep_square {
             self.hash ^= keys.ep_keys[file_of(ep) as usize];
         }
 
-        // Remove old castling from hash
         self.hash ^= keys.castle_keys[self.castling as usize];
 
-        // Increment halfmove clock
         self.halfmove += 1;
 
-        // Reset ep square
         self.ep_square = None;
 
         match m.flags() {
@@ -388,7 +336,6 @@ impl Board {
                 self.hash ^= keys.piece_keys[us.index()][Piece::Pawn.index()][from as usize];
                 self.hash ^= keys.piece_keys[us.index()][Piece::Pawn.index()][to as usize];
 
-                // Set en passant square
                 let ep = match us {
                     Color::White => from + 8,
                     Color::Black => from - 8,
@@ -398,11 +345,9 @@ impl Board {
                 self.halfmove = 0;
             }
             FLAG_KING_CASTLE => {
-                // Move king
                 self.move_piece(Piece::King, us, from, to);
                 self.hash ^= keys.piece_keys[us.index()][Piece::King.index()][from as usize];
                 self.hash ^= keys.piece_keys[us.index()][Piece::King.index()][to as usize];
-                // Move rook
                 let (rook_from, rook_to) = match us {
                     Color::White => (sq::H1, sq::F1),
                     Color::Black => (sq::H8, sq::F8),
@@ -446,7 +391,6 @@ impl Board {
             }
             _ if m.is_promotion() => {
                 let promo = m.promotion_piece().unwrap();
-                // Remove pawn
                 self.remove_piece(Piece::Pawn, us, from);
                 self.hash ^= keys.piece_keys[us.index()][Piece::Pawn.index()][from as usize];
 
@@ -456,17 +400,13 @@ impl Board {
                     self.hash ^= keys.piece_keys[them.index()][cap.index()][to as usize];
                 }
 
-                // Add promoted piece
                 self.put_piece(promo, us, to);
                 self.hash ^= keys.piece_keys[us.index()][promo.index()][to as usize];
                 self.halfmove = 0;
             }
             _ => unreachable!("Unknown move flag: {:04b}", m.flags()),
         }
-
-        // NNUE accumulator incremental update
         if nnue_active {
-            // compute king squares after the board update, before borrowing accumulator
             let white_king_sq = self.king_sq(Color::White);
             let black_king_sq = self.king_sq(Color::Black);
             let acc = &mut self.accumulator;
@@ -515,20 +455,14 @@ impl Board {
                 _ => {}
             }
         }
-
-        // Update castling rights
         self.castling &= Self::CASTLE_MASK[from as usize] & Self::CASTLE_MASK[to as usize];
         self.hash ^= keys.castle_keys[self.castling as usize];
-
-        // Flip side
         self.side = them;
         self.hash ^= keys.side_key;
 
         if us == Color::Black {
             self.fullmove += 1;
         }
-
-        // Check legality: the side that just moved must not be in check
         if self.is_square_attacked(self.king_sq(us), them) {
             self.unmake_move(m);
             return false;
@@ -536,19 +470,13 @@ impl Board {
 
         true
     }
-
-    /// Unmake a move, restoring the previous board state
     pub fn unmake_move(&mut self, m: Move) {
         let undo = self.history.pop().expect("No undo info on stack");
-
-        // Restore NNUE accumulator
         if nnue::is_active() {
             if let Some(prev_acc) = self.acc_history.pop() {
                 self.accumulator = prev_acc;
             }
         }
-
-        // Flip side back
         self.side = self.side.flip();
         let us = self.side;
         let them = us.flip();
@@ -611,8 +539,6 @@ impl Board {
         self.halfmove = undo.halfmove;
         self.hash = undo.hash;
     }
-
-    /// Make a null move (pass the turn). Used in null move pruning.
     pub fn make_null_move(&mut self) {
         let keys = zobrist::keys();
 
@@ -632,23 +558,16 @@ impl Board {
         self.side = self.side.flip();
         self.hash ^= keys.side_key;
     }
-
-    /// Unmake a null move
     pub fn unmake_null_move(&mut self) {
         let undo = self.history.pop().expect("No undo info on stack");
         self.side = self.side.flip();
         self.ep_square = undo.ep_square;
         self.hash = undo.hash;
     }
-
-    /// Check if a square is attacked by a given color.
-    /// This is used for check detection, castling legality, etc.
     pub fn is_square_attacked(&self, sq: u8, by_color: Color) -> bool {
         use crate::movegen;
 
         let them = by_color.index();
-
-        // Pawn attacks
         let pawn_attacks = match by_color {
             Color::White => movegen::black_pawn_attacks(square_bb(sq)),
             Color::Black => movegen::white_pawn_attacks(square_bb(sq)),
@@ -656,24 +575,16 @@ impl Board {
         if pawn_attacks & self.pieces[them][Piece::Pawn.index()] != 0 {
             return true;
         }
-
-        // Knight attacks
         if movegen::knight_attacks(sq) & self.pieces[them][Piece::Knight.index()] != 0 {
             return true;
         }
-
-        // King attacks
         if movegen::king_attacks(sq) & self.pieces[them][Piece::King.index()] != 0 {
             return true;
         }
-
-        // Bishop/Queen attacks (diagonal)
         let bishop_attacks = movegen::bishop_attacks(sq, self.all_occupancy);
         if bishop_attacks & (self.pieces[them][Piece::Bishop.index()] | self.pieces[them][Piece::Queen.index()]) != 0 {
             return true;
         }
-
-        // Rook/Queen attacks (straight)
         let rook_attacks = movegen::rook_attacks(sq, self.all_occupancy);
         if rook_attacks & (self.pieces[them][Piece::Rook.index()] | self.pieces[them][Piece::Queen.index()]) != 0 {
             return true;
@@ -681,13 +592,9 @@ impl Board {
 
         false
     }
-
-    /// Is the current side in check?
     pub fn in_check(&self) -> bool {
         self.is_square_attacked(self.king_sq(self.side), self.side.flip())
     }
-
-    /// Pretty-print the board
     pub fn print(&self) {
         println!();
         for rank in (0..8).rev() {
