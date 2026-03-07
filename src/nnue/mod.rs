@@ -3,9 +3,12 @@ pub mod accumulator;
 pub mod network;
 pub mod simd;
 
-pub const L1_SIZE: usize = 128;
+pub const L1_SIZE: usize = 256;
+pub const L1_PAIR: usize = L1_SIZE / 2;
+pub const L2_INPUT: usize = 2 * L1_PAIR;
 pub const L2_SIZE: usize = 32;
 pub const INPUT_SIZE: usize = 768;
+pub const NUM_PSQT_BUCKETS: usize = 4;
 
 pub const QA: i32 = 255;
 pub const QB: i32 = 64;
@@ -23,4 +26,4 @@ pub use accumulator::{
     accumulator_move_q,
 };
 pub use features::{feature_index_white, feature_index_black};
-pub use network::{init, is_active, evaluate, evaluate_q, forward, forward_q};
+pub use network::{init, is_active, evaluate, evaluate_q, forward, forward_q, psqt_bucket};
