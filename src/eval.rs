@@ -4,45 +4,35 @@ use crate::movegen;
 use crate::moves::Move;
 use crate::nnue;
 
-// ============================================================
-// Material values (centipawns)
-// ============================================================
 pub const PAWN_VALUE: i32   = 100;
 pub const KNIGHT_VALUE: i32 = 320;
 pub const BISHOP_VALUE: i32 = 330;
 pub const ROOK_VALUE: i32   = 500;
 pub const QUEEN_VALUE: i32  = 900;
-pub const KING_VALUE: i32   = 0; // King has no material value
+pub const KING_VALUE: i32   = 0;
 
 pub const PIECE_VALUES: [i32; PIECE_COUNT] = [
     PAWN_VALUE, KNIGHT_VALUE, BISHOP_VALUE, ROOK_VALUE, QUEEN_VALUE, KING_VALUE
 ];
 
-// Phase values for tapered eval (total = 24)
 const KNIGHT_PHASE: i32 = 1;
 const BISHOP_PHASE: i32 = 1;
 const ROOK_PHASE: i32   = 2;
 const QUEEN_PHASE: i32  = 4;
 const TOTAL_PHASE: i32  = 4 * KNIGHT_PHASE + 4 * BISHOP_PHASE + 4 * ROOK_PHASE + 2 * QUEEN_PHASE;
 
-// ============================================================
-// Piece-Square Tables (from white's perspective, flipped for black)
-// Index: square (a1=0 through h8=63)
-// Values in centipawns, [midgame, endgame]
-// ============================================================
-
-type PstPair = [i32; 2]; // [midgame, endgame]
+type PstPair = [i32; 2];
 
 #[rustfmt::skip]
 const PAWN_PST: [PstPair; 64] = [
-    [ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],  // rank 1 (no pawns)
-    [-1, 0],[ 1, 0],[-4, 0],[-8, 0],[-8, 0],[-4, 0],[ 1, 0],[-1, 0],  // rank 2
-    [-2,-1],[ 0, 0],[-3, 0],[-1, 0],[-1, 0],[-3, 0],[ 0, 0],[-2,-1],  // rank 3
-    [-2, 3],[ 2, 3],[ 6, 1],[12, 0],[12, 0],[ 6, 1],[ 2, 3],[-2, 3],  // rank 4
-    [ 3, 8],[ 8, 8],[14, 5],[22, 2],[22, 2],[14, 5],[ 8, 8],[ 3, 8],  // rank 5
-    [ 5,18],[12,18],[18,14],[28,10],[28,10],[18,14],[12,18],[ 5,18],  // rank 6
-    [10,40],[15,40],[20,35],[30,30],[30,30],[20,35],[15,40],[10,40],  // rank 7
-    [ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],  // rank 8 (no pawns)
+    [ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],
+    [-1, 0],[ 1, 0],[-4, 0],[-8, 0],[-8, 0],[-4, 0],[ 1, 0],[-1, 0],
+    [-2,-1],[ 0, 0],[-3, 0],[-1, 0],[-1, 0],[-3, 0],[ 0, 0],[-2,-1],
+    [-2, 3],[ 2, 3],[ 6, 1],[12, 0],[12, 0],[ 6, 1],[ 2, 3],[-2, 3],
+    [ 3, 8],[ 8, 8],[14, 5],[22, 2],[22, 2],[14, 5],[ 8, 8],[ 3, 8],
+    [ 5,18],[12,18],[18,14],[28,10],[28,10],[18,14],[12,18],[ 5,18],
+    [10,40],[15,40],[20,35],[30,30],[30,30],[20,35],[15,40],[10,40],
+    [ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],[ 0, 0],
 ];
 
 #[rustfmt::skip]
@@ -109,13 +99,11 @@ const PST: [[PstPair; 64]; PIECE_COUNT] = [
     PAWN_PST, KNIGHT_PST, BISHOP_PST, ROOK_PST, QUEEN_PST, KING_PST
 ];
 
-/// Flip a square vertically (for accessing PST from black's perspective)
 #[inline]
 fn flip_sq(sq: u8) -> u8 {
     sq ^ 56
 }
 
-/// Compute phase (how much material is on the board)
 fn compute_phase(board: &Board) -> i32 {
     let mut phase = TOTAL_PHASE;
     for color in 0..COLOR_COUNT {
@@ -124,11 +112,9 @@ fn compute_phase(board: &Board) -> i32 {
         phase -= popcount(board.pieces[color][Piece::Rook.index()]) as i32 * ROOK_PHASE;
         phase -= popcount(board.pieces[color][Piece::Queen.index()]) as i32 * QUEEN_PHASE;
     }
-    phase.max(0) // Clamp to 0 (full endgame) - TOTAL_PHASE (full opening)
+    phase.max(0)
 }
 
-/// Main evaluation function. Returns score in centipawns from the perspective
-/// of the side to move.
 pub fn evaluate(board: &Board) -> i32 {
     if nnue::is_active() {
         return nnue::evaluate_q(board, &board.accumulator_q);
@@ -137,21 +123,18 @@ pub fn evaluate(board: &Board) -> i32 {
     evaluate_hce(board)
 }
 
-/// Hand-crafted evaluation (HCE) — the classical evaluation function.
 fn evaluate_hce(board: &Board) -> i32 {
-    let mut mg_score: [i32; 2] = [0, 0]; // midgame score per side
-    let mut eg_score: [i32; 2] = [0, 0]; // endgame score per side
+    let mut mg_score: [i32; 2] = [0, 0];
+    let mut eg_score: [i32; 2] = [0, 0];
 
     for color in 0..COLOR_COUNT {
         for piece in 0..PIECE_COUNT {
             let mut bb = board.pieces[color][piece];
             while bb != 0 {
                 let sq = pop_lsb(&mut bb);
-                // Material
                 mg_score[color] += PIECE_VALUES[piece];
                 eg_score[color] += PIECE_VALUES[piece];
 
-                // Piece-square table
                 let pst_sq = if color == 0 { sq } else { flip_sq(sq) };
                 mg_score[color] += PST[piece][pst_sq as usize][0];
                 eg_score[color] += PST[piece][pst_sq as usize][1];
@@ -159,7 +142,6 @@ fn evaluate_hce(board: &Board) -> i32 {
         }
     }
 
-    // Bishop pair bonus
     for color in 0..COLOR_COUNT {
         if popcount(board.pieces[color][Piece::Bishop.index()]) >= 2 {
             mg_score[color] += 30;
@@ -167,30 +149,22 @@ fn evaluate_hce(board: &Board) -> i32 {
         }
     }
 
-    // Pawn structure evaluation
     eval_pawn_structure(board, &mut mg_score, &mut eg_score);
 
-    // Rook on open/semi-open file
     eval_rooks(board, &mut mg_score, &mut eg_score);
 
-    // Mobility
     eval_mobility(board, &mut mg_score, &mut eg_score);
 
-    // King safety
     eval_king_safety(board, &mut mg_score, &mut eg_score);
 
-    // Edge pawn dynamics
     eval_edge_pawns(board, &mut mg_score, &mut eg_score);
 
-    // Tapered eval: interpolate between midgame and endgame
     let phase = compute_phase(board);
     let mg = mg_score[Color::White.index()] - mg_score[Color::Black.index()];
     let eg = eg_score[Color::White.index()] - eg_score[Color::Black.index()];
 
-    // phase = TOTAL_PHASE means opening (all pieces), phase = 0 means endgame (no pieces)
     let score = (mg * (TOTAL_PHASE - phase) + eg * phase) / TOTAL_PHASE;
 
-    // Return from perspective of side to move
     match board.side {
         Color::White => score,
         Color::Black => -score,
@@ -208,13 +182,11 @@ fn eval_pawn_structure(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
             let file = file_of(sq) as usize;
             let file_mask = FILES[file];
 
-            // Doubled pawns penalty
             if popcount(our_pawns & file_mask) > 1 {
                 mg[color] -= 8;
                 eg[color] -= 12;
             }
 
-            // Isolated pawns penalty
             let adjacent_files = match file {
                 0 => FILES[1],
                 7 => FILES[6],
@@ -225,17 +197,14 @@ fn eval_pawn_structure(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
                 eg[color] -= 15;
             }
 
-            // Passed pawn bonus
             let rank = rank_of(sq);
             let ahead_mask = if color == 0 {
-                // White: ranks above current rank
                 let mut m: Bitboard = 0;
                 for r in (rank + 1)..8 {
                     m |= RANKS[r as usize];
                 }
                 m & (file_mask | adjacent_files)
             } else {
-                // Black: ranks below current rank
                 let mut m: Bitboard = 0;
                 for r in 0..rank {
                     m |= RANKS[r as usize];
@@ -244,7 +213,6 @@ fn eval_pawn_structure(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
             };
 
             if their_pawns & ahead_mask == 0 {
-                // Passed pawn! Bonus based on how far advanced
                 let advancement = if color == 0 { rank } else { 7 - rank };
                 let bonus = match advancement {
                     1 => [5, 10],
@@ -274,11 +242,9 @@ fn eval_rooks(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
 
             if our_pawns & file_mask == 0 {
                 if their_pawns & file_mask == 0 {
-                    // Open file
                     mg[color] += 20;
                     eg[color] += 15;
                 } else {
-                    // Semi-open file
                     mg[color] += 10;
                     eg[color] += 8;
                 }
@@ -357,62 +323,35 @@ fn eval_king_safety(board: &Board, mg: &mut [i32; 2], _eg: &mut [i32; 2]) {
     }
 }
 
-/// Edge pawn evaluation.
-///
-/// Pawns on files A and H have a structural limitation: they can only capture
-/// in one diagonal direction. This means:
-///   - Fewer attacking prospects (1 capture square vs 2 for interior pawns)
-///   - Only one possible en passant capture square
-///   - They cannot defend/support pawns on the opposite side
-///
-/// However, when an edge pawn captures a piece, it moves to file B or G,
-/// gaining full two-directional capture ability. This "path unlock" is
-/// strategically significant — the pawn now covers squares on its original
-/// edge file (effective backward influence) while also attacking inward.
-///
-/// We evaluate:
-///   1. Penalty for pawns stuck on the edge (scaled by advancement)
-///   2. Bonus for edge pawns with available captures (they can unlock)
-///   3. Bonus for pawns on B/G that have no friendly pawn behind them on the
-///      edge — these likely captured off the edge and have superior scope
 fn eval_edge_pawns(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
     for color in 0..COLOR_COUNT {
         let our_pawns = board.pieces[color][Piece::Pawn.index()];
         let their_occ = board.occupancy[color ^ 1];
         let us_color = if color == 0 { Color::White } else { Color::Black };
 
-        // --- Edge pawns on FILE_A ---
         let mut a_pawns = our_pawns & FILE_A;
         while a_pawns != 0 {
             let sq = pop_lsb(&mut a_pawns);
             let rank = rank_of(sq);
             let advancement = if color == 0 { rank } else { 7 - rank };
 
-            // Penalty: edge pawn has only one capture direction.
-            // Scales with advancement — a more advanced edge pawn is more
-            // constrained since it has fewer remaining ranks to correct course.
             let penalty_mg = 3 + advancement as i32;
             let penalty_eg = 5 + 2 * advancement as i32;
             mg[color] -= penalty_mg;
             eg[color] -= penalty_eg;
 
-            // Bonus if this edge pawn can capture right now (unlock the path).
-            // For white A-file pawn: can capture to B (north-east).
-            // For black A-file pawn: can capture to B (south-east).
             let capture_sq = match us_color {
                 Color::White => if rank < 7 { Some(make_square(1, rank + 1)) } else { None },
                 Color::Black => if rank > 0 { Some(make_square(1, rank - 1)) } else { None },
             };
             if let Some(csq) = capture_sq {
                 if get_bit(their_occ, csq) {
-                    // Available capture to escape the edge
                     mg[color] += 8;
                     eg[color] += 12;
                 }
             }
         }
 
-        // --- Edge pawns on FILE_H ---
         let mut h_pawns = our_pawns & FILE_H;
         while h_pawns != 0 {
             let sq = pop_lsb(&mut h_pawns);
@@ -424,8 +363,6 @@ fn eval_edge_pawns(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
             mg[color] -= penalty_mg;
             eg[color] -= penalty_eg;
 
-            // For white H-file pawn: can capture to G (north-west).
-            // For black H-file pawn: can capture to G (south-west).
             let capture_sq = match us_color {
                 Color::White => if rank < 7 { Some(make_square(6, rank + 1)) } else { None },
                 Color::Black => if rank > 0 { Some(make_square(6, rank - 1)) } else { None },
@@ -438,12 +375,6 @@ fn eval_edge_pawns(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
             }
         }
 
-        // --- Off-edge bonus: pawns on B or G with no friendly edge pawn behind ---
-        // These pawns likely arrived here via a capture from the edge. They now
-        // have full two-directional coverage AND threaten back toward the edge
-        // file they came from — effective "backward" pawn influence.
-
-        // File B pawns with no friendly pawn on file A
         let b_pawns = our_pawns & FILE_B;
         if b_pawns != 0 && (our_pawns & FILE_A) == 0 {
             let count = popcount(b_pawns) as i32;
@@ -451,7 +382,6 @@ fn eval_edge_pawns(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
             eg[color] += count * 8;
         }
 
-        // File G pawns with no friendly pawn on file H
         let g_pawns = our_pawns & FILE_G;
         if g_pawns != 0 && (our_pawns & FILE_H) == 0 {
             let count = popcount(g_pawns) as i32;
@@ -461,14 +391,6 @@ fn eval_edge_pawns(board: &Board, mg: &mut [i32; 2], eg: &mut [i32; 2]) {
     }
 }
 
-/// Static Exchange Evaluation — determines the material outcome of a capture
-/// sequence on a single square, assuming both sides play optimally.
-///
-/// Uses the "swap algorithm": we simulate alternating captures on the target
-/// square, tracking a gain stack, then propagate back with min/max to determine
-/// whether the side to move benefits from the initial capture.
-///
-/// Returns the net material gain (positive = good for the capturing side).
 pub fn see(board: &Board, m: Move) -> i32 {
     if !m.is_capture() {
         return 0;
@@ -517,7 +439,7 @@ pub fn see(board: &Board, m: Move) -> i32 {
 
         let (attacker_sq, piece) = match least_valuable_attacker(board, to, side, occ) {
             Some(result) => result,
-            None => break, // No more attackers — exchange ends
+            None => break,
         };
 
         gain[d] = piece_on_target - gain[d - 1];
@@ -579,12 +501,6 @@ fn least_valuable_attacker(board: &Board, sq: u8, side: Color, occ: Bitboard) ->
     None
 }
 
-// ============================================================
-// MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
-// For move ordering in search
-// MVV-LVA score: higher = better capture to search first
-// ============================================================
-
 pub fn mvv_lva_score(m: Move) -> i32 {
     if !m.is_capture() {
         return 0;
@@ -636,23 +552,17 @@ mod tests {
         setup();
         let board = Board::start_pos();
         let score = evaluate(&board);
-        // Starting position should be roughly equal
         assert!(score.abs() < 50, "Start position eval should be near 0, got {}", score);
     }
 
     #[test]
     fn test_eval_material_advantage() {
         setup();
-        // White has an extra queen
         let board = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
         let score = evaluate(&board);
-        // Should be symmetric-ish at start
         assert!(score.abs() < 50);
     }
 
-    // ---- SEE tests ----
-
-    /// Helper: find a move from `from_str` to `to_str` in the legal move list
     fn find_move(board: &Board, from_str: &str, to_str: &str) -> Move {
         use crate::bitboard::parse_square;
         let from = parse_square(from_str).unwrap();
@@ -686,7 +596,6 @@ mod tests {
     #[test]
     fn test_see_simple_pawn_takes_pawn() {
         setup();
-        // White pawn on e4, black pawn on d5 — PxP is even
         let board = Board::from_fen("8/8/8/3p4/4P3/8/8/4K2k w - - 0 1").unwrap();
         let m = find_move(&board, "e4", "d5");
         let score = see(&board, m);
@@ -696,40 +605,33 @@ mod tests {
     #[test]
     fn test_see_pawn_takes_defended_pawn() {
         setup();
-        // White pawn e4, black pawn d5 defended by pawn on e6
         let board = Board::from_fen("8/8/4p3/3p4/4P3/8/8/4K2k w - - 0 1").unwrap();
         let m = find_move(&board, "e4", "d5");
         let score = see(&board, m);
-        // PxP, then pxP recapture — net 0 (exchange pawns)
         assert_eq!(score, 0, "PxP with pawn defender should be 0");
     }
 
     #[test]
     fn test_see_knight_takes_defended_pawn() {
         setup();
-        // White knight on c3, black pawn on d5 defended by pawn on e6
         let board = Board::from_fen("8/8/4p3/3p4/8/2N5/8/4K2k w - - 0 1").unwrap();
         let m = find_move(&board, "c3", "d5");
         let score = see(&board, m);
-        // NxP (gain 100), then pxN (they gain 320) — net: 100 - 320 = -220
         assert!(score < 0, "Knight taking pawn defended by pawn should be negative, got {}", score);
     }
 
     #[test]
     fn test_see_queen_takes_defended_pawn() {
         setup();
-        // White queen on d1, black pawn on d5 defended by pawn on e6
         let board = Board::from_fen("8/8/4p3/3p4/8/8/8/3QK2k w - - 0 1").unwrap();
         let m = find_move(&board, "d1", "d5");
         let score = see(&board, m);
-        // QxP (gain 100), then pxQ (they gain 900) — net: 100 - 900 = bad
         assert!(score < 0, "Queen taking defended pawn should be losing, got {}", score);
     }
 
     #[test]
     fn test_see_rook_takes_rook() {
         setup();
-        // White rook e1, black rook e8, open file — RxR is even (undefended)
         let board = Board::from_fen("4r3/8/8/8/8/8/8/4RK1k w - - 0 1").unwrap();
         let m = find_move(&board, "e1", "e8");
         let score = see(&board, m);
@@ -739,8 +641,6 @@ mod tests {
     #[test]
     fn test_see_xray_battery() {
         setup();
-        // White rook e1, white rook e2 (battery), black rook e8
-        // RxR, opponent has nothing — gain 500
         let board = Board::from_fen("4r3/8/8/8/8/8/4R3/4RK1k w - - 0 1").unwrap();
         let m = find_move(&board, "e2", "e8");
         let score = see(&board, m);
@@ -750,7 +650,6 @@ mod tests {
     #[test]
     fn test_see_pawn_takes_queen() {
         setup();
-        // White pawn on e4, black queen on d5 — PxQ wins a queen
         let board = Board::from_fen("8/8/8/3q4/4P3/8/8/4K2k w - - 0 1").unwrap();
         let m = find_move(&board, "e4", "d5");
         let score = see(&board, m);
@@ -769,20 +668,15 @@ mod tests {
     #[test]
     fn test_see_bishop_takes_knight_with_recapture() {
         setup();
-        // White bishop c1, black knight on e3, defended by pawn d4
-        // BxN (gain 320), pxB (they gain 330) — net: 320 - 330 = -10
         let board = Board::from_fen("8/8/8/8/3p4/4n3/8/2B1K2k w - - 0 1").unwrap();
         let m = find_move(&board, "c1", "e3");
         let score = see(&board, m);
         assert!(score < 0, "BxN defended by pawn should be negative, got {}", score);
     }
 
-    // ---- Edge pawn evaluation tests ----
-
     #[test]
     fn test_edge_pawn_penalty_vs_interior() {
         setup();
-        // White pawn on a4 (edge) vs white pawn on d4 (interior), same material
         let edge = Board::from_fen("8/8/8/8/P7/8/8/4K2k w - - 0 1").unwrap();
         let interior = Board::from_fen("8/8/8/8/3P4/8/8/4K2k w - - 0 1").unwrap();
         let edge_score = evaluate(&edge);
@@ -795,33 +689,20 @@ mod tests {
     #[test]
     fn test_edge_pawn_capture_available_bonus() {
         setup();
-        // White pawn on a4 with a capturable black piece on b5
         let with_target = Board::from_fen("8/8/8/1p6/P7/8/8/4K2k w - - 0 1").unwrap();
-        // White pawn on a4 with no capturable piece
         let no_target = Board::from_fen("8/8/8/8/P7/8/8/4K2k w - - 0 1").unwrap();
         let score_with = evaluate(&with_target);
         let score_without = evaluate(&no_target);
-        // The position with a capture target gets the "path unlock" bonus,
-        // partially offsetting the edge penalty.
-        // Note: score_with also includes the opponent having a pawn (material difference)
-        // so we can't compare directly — instead verify the function doesn't crash
-        // and the edge penalty is present in both.
-        // The no_target position should have worse eval due to edge penalty with no escape.
         assert!(score_without != 0, "Edge pawn should affect eval");
     }
 
     #[test]
     fn test_off_edge_bonus_b_file() {
         setup();
-        // White pawn on b4, no white pawn on a-file — likely captured off edge
         let off_edge = Board::from_fen("8/8/8/8/1P6/8/8/4K2k w - - 0 1").unwrap();
-        // White pawn on b4, with a white pawn still on a2 — normal b-file pawn
         let normal = Board::from_fen("8/8/8/8/1P6/8/P7/4K2k w - - 0 1").unwrap();
         let off_edge_score = evaluate(&off_edge);
         let normal_score = evaluate(&normal);
-        // The normal position has an extra pawn, so it should score higher overall.
-        // But per-pawn, the off-edge b-pawn should have the bonus.
-        // We verify the scoring path works and edge pawn logic is invoked.
         assert!(normal_score > off_edge_score,
             "Position with extra pawn should score higher");
     }
@@ -829,14 +710,10 @@ mod tests {
     #[test]
     fn test_edge_pawn_advancement_scaling() {
         setup();
-        // Advanced edge pawn (a6) should have a bigger penalty than non-advanced (a2)
         let advanced = Board::from_fen("8/8/P7/8/8/8/8/4K2k w - - 0 1").unwrap();
         let early = Board::from_fen("8/8/8/8/8/8/P7/4K2k w - - 0 1").unwrap();
         let advanced_score = evaluate(&advanced);
         let early_score = evaluate(&early);
-        // Advanced edge pawn gets a larger penalty, but also a better PST score
-        // for advancement. The key is that the eval function handles both correctly.
-        // Just verify both produce valid scores.
         assert!(advanced_score != early_score,
             "Different advancement should produce different scores");
     }
@@ -844,13 +721,10 @@ mod tests {
     #[test]
     fn test_edge_pawn_symmetry() {
         setup();
-        // File A edge pawn for white should have similar penalty to file H edge pawn
         let a_pawn = Board::from_fen("8/8/8/8/P7/8/8/4K2k w - - 0 1").unwrap();
         let h_pawn = Board::from_fen("8/8/8/8/7P/8/8/4K2k w - - 0 1").unwrap();
         let a_score = evaluate(&a_pawn);
         let h_score = evaluate(&h_pawn);
-        // Both edge files should have the same edge penalty magnitude.
-        // Small PST differences may exist, but they should be close.
         let diff = (a_score - h_score).abs();
         assert!(diff <= 20,
             "A-file and H-file edge pawns should have similar eval, diff={}", diff);

@@ -1,21 +1,12 @@
-/// Move generation using precomputed attack tables.
-/// - Knight and King: lookup tables
-/// - Sliding pieces (Bishop, Rook, Queen): magic bitboards
-/// - Pawns: computed directly from bitboard shifts
 
 use crate::bitboard::*;
 use crate::board::*;
 use crate::moves::*;
 use std::sync::OnceLock;
 
-// ============================================================
-// Precomputed attack tables
-// ============================================================
-
 struct AttackTables {
     knight: [Bitboard; 64],
     king: [Bitboard; 64],
-    // Magic bitboard tables for sliding pieces
     bishop_magics: Vec<MagicEntry>,
     rook_magics: Vec<MagicEntry>,
     bishop_table: Vec<Bitboard>,
@@ -31,7 +22,6 @@ struct MagicEntry {
 
 static TABLES: OnceLock<AttackTables> = OnceLock::new();
 
-/// Initialize all attack tables. Must be called once at startup.
 pub fn init() {
     TABLES.get_or_init(|| {
         let knight = init_knight_attacks();
@@ -53,30 +43,24 @@ fn tables() -> &'static AttackTables {
     TABLES.get().expect("Attack tables not initialized! Call movegen::init() first.")
 }
 
-// ============================================================
-// Knight attacks
-// ============================================================
 fn init_knight_attacks() -> [Bitboard; 64] {
     let mut attacks = [0u64; 64];
     for sq in 0..64u8 {
         let bb = square_bb(sq);
         let mut a: Bitboard = 0;
-        a |= (bb << 17) & NOT_FILE_A;    // up 2, right 1
-        a |= (bb << 15) & NOT_FILE_H;    // up 2, left 1
-        a |= (bb << 10) & NOT_FILE_AB;   // up 1, right 2
-        a |= (bb << 6)  & NOT_FILE_GH;   // up 1, left 2
-        a |= (bb >> 6)  & NOT_FILE_AB;   // down 1, right 2
-        a |= (bb >> 10) & NOT_FILE_GH;   // down 1, left 2
-        a |= (bb >> 15) & NOT_FILE_A;    // down 2, right 1
-        a |= (bb >> 17) & NOT_FILE_H;    // down 2, left 1
+        a |= (bb << 17) & NOT_FILE_A;
+        a |= (bb << 15) & NOT_FILE_H;
+        a |= (bb << 10) & NOT_FILE_AB;
+        a |= (bb << 6)  & NOT_FILE_GH;
+        a |= (bb >> 6)  & NOT_FILE_AB;
+        a |= (bb >> 10) & NOT_FILE_GH;
+        a |= (bb >> 15) & NOT_FILE_A;
+        a |= (bb >> 17) & NOT_FILE_H;
         attacks[sq as usize] = a;
     }
     attacks
 }
 
-// ============================================================
-// King attacks
-// ============================================================
 fn init_king_attacks() -> [Bitboard; 64] {
     let mut attacks = [0u64; 64];
     for sq in 0..64u8 {
@@ -95,11 +79,6 @@ fn init_king_attacks() -> [Bitboard; 64] {
     attacks
 }
 
-// ============================================================
-// Magic bitboards for sliding pieces
-// ============================================================
-
-/// Relevant occupancy mask for a bishop on a given square (edges excluded)
 fn bishop_mask(sq: u8) -> Bitboard {
     let mut mask: Bitboard = 0;
     let (r, f) = (rank_of(sq) as i8, file_of(sq) as i8);
@@ -115,31 +94,25 @@ fn bishop_mask(sq: u8) -> Bitboard {
     mask
 }
 
-/// Relevant occupancy mask for a rook on a given square (edges excluded on the relevant axes)
 fn rook_mask(sq: u8) -> Bitboard {
     let mut mask: Bitboard = 0;
     let (r, f) = (rank_of(sq) as i8, file_of(sq) as i8);
 
-    // Up
     for cr in (r + 1)..7 {
         mask |= square_bb(make_square(f as u8, cr as u8));
     }
-    // Down
     for cr in 1..r {
         mask |= square_bb(make_square(f as u8, cr as u8));
     }
-    // Right
     for cf in (f + 1)..7 {
         mask |= square_bb(make_square(cf as u8, r as u8));
     }
-    // Left
     for cf in 1..f {
         mask |= square_bb(make_square(cf as u8, r as u8));
     }
     mask
 }
 
-/// Compute bishop attacks for a given square and occupancy (used to build table)
 fn bishop_attacks_slow(sq: u8, occ: Bitboard) -> Bitboard {
     let mut attacks: Bitboard = 0;
     let (r, f) = (rank_of(sq) as i8, file_of(sq) as i8);
@@ -159,7 +132,6 @@ fn bishop_attacks_slow(sq: u8, occ: Bitboard) -> Bitboard {
     attacks
 }
 
-/// Compute rook attacks for a given square and occupancy (used to build table)
 fn rook_attacks_slow(sq: u8, occ: Bitboard) -> Bitboard {
     let mut attacks: Bitboard = 0;
     let (r, f) = (rank_of(sq) as i8, file_of(sq) as i8);
@@ -179,7 +151,6 @@ fn rook_attacks_slow(sq: u8, occ: Bitboard) -> Bitboard {
     attacks
 }
 
-/// Enumerate all subsets of a mask using the Carry-Rippler trick
 fn enumerate_subsets(mask: Bitboard) -> Vec<Bitboard> {
     let mut subsets = Vec::new();
     let mut subset: Bitboard = 0;
@@ -193,8 +164,6 @@ fn enumerate_subsets(mask: Bitboard) -> Vec<Bitboard> {
     subsets
 }
 
-/// Find magic numbers by trial. We use known good magics for speed.
-/// These were found by brute-force search and are commonly known values.
 #[rustfmt::skip]
 const BISHOP_MAGICS_RAW: [u64; 64] = [
     0x40040844404084, 0x2004208a004208, 0x10190041080202, 0x108060845042010,
@@ -255,7 +224,6 @@ const ROOK_BITS: [u8; 64] = {
     bits
 };
 
-// Const versions of mask functions for compile-time evaluation
 const fn bishop_mask_const(sq: u8) -> Bitboard {
     let mut mask: Bitboard = 0;
     let r = (sq >> 3) as i8;
@@ -291,7 +259,6 @@ const fn rook_mask_const(sq: u8) -> Bitboard {
 }
 
 fn init_bishop_magics() -> (Vec<MagicEntry>, Vec<Bitboard>) {
-    // Pre-allocate: total size is sum of 2^bits for each square
     let total: usize = (0..64).map(|sq| 1 << BISHOP_BITS[sq]).sum();
     let mut table = vec![0u64; total];
     let mut magics = Vec::with_capacity(64);
@@ -313,7 +280,6 @@ fn init_bishop_magics() -> (Vec<MagicEntry>, Vec<Bitboard>) {
         offset += 1 << bits;
     }
 
-    // Shrink-wrap the Vec. We pre-sized it, but let's verify.
     assert_eq!(offset, total);
 
     (magics, table)
@@ -344,10 +310,6 @@ fn init_rook_magics() -> (Vec<MagicEntry>, Vec<Bitboard>) {
     assert_eq!(offset, total);
     (magics, table)
 }
-
-// ============================================================
-// Public attack lookup functions
-// ============================================================
 
 #[inline]
 pub fn knight_attacks(sq: u8) -> Bitboard {
@@ -380,10 +342,6 @@ pub fn queen_attacks(sq: u8, occ: Bitboard) -> Bitboard {
     bishop_attacks(sq, occ) | rook_attacks(sq, occ)
 }
 
-// ============================================================
-// Pawn attack helpers
-// ============================================================
-
 #[inline]
 pub fn white_pawn_attacks(pawns: Bitboard) -> Bitboard {
     north_east(pawns) | north_west(pawns)
@@ -394,7 +352,6 @@ pub fn black_pawn_attacks(pawns: Bitboard) -> Bitboard {
     south_east(pawns) | south_west(pawns)
 }
 
-/// Single pawn attacks from a square for a color
 #[inline]
 pub fn pawn_attacks(sq: u8, color: Color) -> Bitboard {
     let bb = square_bb(sq);
@@ -404,12 +361,6 @@ pub fn pawn_attacks(sq: u8, color: Color) -> Bitboard {
     }
 }
 
-// ============================================================
-// Move generation
-// ============================================================
-
-/// Generate all pseudo-legal moves for the current position.
-/// Legality is checked by make_move (verifying the king isn't in check after).
 pub fn generate_moves(board: &Board, list: &mut MoveList) {
     let us = board.side;
     let them = us.flip();
@@ -427,7 +378,6 @@ pub fn generate_moves(board: &Board, list: &mut MoveList) {
     generate_castles(board, list, us, all_occ);
 }
 
-/// Generate only capture moves (for quiescence search)
 pub fn generate_captures(board: &Board, list: &mut MoveList) {
     let us = board.side;
     let them = us.flip();
@@ -444,13 +394,11 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList, us: Color, their_occ:
     let promo_rank = match us { Color::White => RANK_8, Color::Black => RANK_1 };
     let _start_rank = match us { Color::White => RANK_2, Color::Black => RANK_7 };
 
-    // Single pushes
     let single = match us {
         Color::White => north(pawns) & empty,
         Color::Black => south(pawns) & empty,
     };
 
-    // Non-promotion single pushes
     let mut quiet_single = single & !promo_rank;
     while quiet_single != 0 {
         let to = pop_lsb(&mut quiet_single);
@@ -458,7 +406,6 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList, us: Color, their_occ:
         list.push(Move::new(from, to, FLAG_QUIET, Piece::Pawn));
     }
 
-    // Double pushes
     let double_target = match us {
         Color::White => north(single & RANK_3) & empty,
         Color::Black => south(single & RANK_6) & empty,
@@ -470,7 +417,6 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList, us: Color, their_occ:
         list.push(Move::new(from, to, FLAG_DOUBLE_PAWN, Piece::Pawn));
     }
 
-    // Promotion pushes
     let mut promo = single & promo_rank;
     while promo != 0 {
         let to = pop_lsb(&mut promo);
@@ -481,7 +427,6 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList, us: Color, their_occ:
         list.push(Move::new(from, to, FLAG_PROMO_N, Piece::Pawn));
     }
 
-    // Captures
     let (attack_left, attack_right) = match us {
         Color::White => (north_west(pawns), north_east(pawns)),
         Color::Black => (south_west(pawns), south_east(pawns)),
@@ -492,7 +437,6 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList, us: Color, their_occ:
         Color::Black => (9, 7),
     };
 
-    // Left captures (non-promotion)
     let mut left_cap = attack_left & their_occ & !promo_rank;
     while left_cap != 0 {
         let to = pop_lsb(&mut left_cap);
@@ -501,7 +445,6 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList, us: Color, their_occ:
         list.push(Move::new_with_capture(from, to, FLAG_CAPTURE, Piece::Pawn, cap));
     }
 
-    // Right captures (non-promotion)
     let mut right_cap = attack_right & their_occ & !promo_rank;
     while right_cap != 0 {
         let to = pop_lsb(&mut right_cap);
@@ -510,7 +453,6 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList, us: Color, their_occ:
         list.push(Move::new_with_capture(from, to, FLAG_CAPTURE, Piece::Pawn, cap));
     }
 
-    // Promotion captures
     let mut left_promo_cap = attack_left & their_occ & promo_rank;
     while left_promo_cap != 0 {
         let to = pop_lsb(&mut left_promo_cap);
@@ -533,7 +475,6 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList, us: Color, their_occ:
         list.push(Move::new_with_capture(from, to, FLAG_PROMO_CAP_N, Piece::Pawn, cap));
     }
 
-    // En passant
     if let Some(ep_sq) = board.ep_square {
         let ep_bb = square_bb(ep_sq);
         let attackers = match us {
@@ -570,7 +511,6 @@ fn generate_pawn_captures(board: &Board, list: &mut MoveList, us: Color, their_o
         Color::Black => (9, 7),
     };
 
-    // All captures (including promotions)
     let mut left_cap = attack_left & their_occ;
     while left_cap != 0 {
         let to = pop_lsb(&mut left_cap);
@@ -601,7 +541,6 @@ fn generate_pawn_captures(board: &Board, list: &mut MoveList, us: Color, their_o
         }
     }
 
-    // En passant
     if let Some(ep_sq) = board.ep_square {
         let ep_bb = square_bb(ep_sq);
         let attackers = match us {
@@ -623,7 +562,6 @@ fn generate_pawn_captures(board: &Board, list: &mut MoveList, us: Color, their_o
         }
     }
 
-    // Promotion pushes (non-capture) are also included in quiescence
     let empty = !board.all_occupancy;
     let single = match us {
         Color::White => north(pawns) & empty,
@@ -713,7 +651,6 @@ fn generate_king_moves(board: &Board, list: &mut MoveList, us: Color, our_occ: B
 }
 
 fn generate_piece_captures(board: &Board, list: &mut MoveList, us: Color, _our_occ: Bitboard, their_occ: Bitboard, all_occ: Bitboard) {
-    // Knights
     let mut knights = board.pieces[us.index()][Piece::Knight.index()];
     while knights != 0 {
         let from = pop_lsb(&mut knights);
@@ -725,7 +662,6 @@ fn generate_piece_captures(board: &Board, list: &mut MoveList, us: Color, _our_o
         }
     }
 
-    // Bishops
     let mut bishops = board.pieces[us.index()][Piece::Bishop.index()];
     while bishops != 0 {
         let from = pop_lsb(&mut bishops);
@@ -737,7 +673,6 @@ fn generate_piece_captures(board: &Board, list: &mut MoveList, us: Color, _our_o
         }
     }
 
-    // Rooks
     let mut rooks = board.pieces[us.index()][Piece::Rook.index()];
     while rooks != 0 {
         let from = pop_lsb(&mut rooks);
@@ -749,7 +684,6 @@ fn generate_piece_captures(board: &Board, list: &mut MoveList, us: Color, _our_o
         }
     }
 
-    // Queens
     let mut queens = board.pieces[us.index()][Piece::Queen.index()];
     while queens != 0 {
         let from = pop_lsb(&mut queens);
@@ -761,7 +695,6 @@ fn generate_piece_captures(board: &Board, list: &mut MoveList, us: Color, _our_o
         }
     }
 
-    // King
     let from = board.king_sq(us);
     let mut caps = king_attacks(from) & their_occ;
     while caps != 0 {
@@ -776,7 +709,6 @@ fn generate_castles(board: &Board, list: &mut MoveList, us: Color, all_occ: Bitb
 
     match us {
         Color::White => {
-            // Kingside
             if board.castling & WK_CASTLE != 0 {
                 let between = square_bb(sq::F1) | square_bb(sq::G1);
                 if all_occ & between == 0
@@ -787,7 +719,6 @@ fn generate_castles(board: &Board, list: &mut MoveList, us: Color, all_occ: Bitb
                     list.push(Move::new(sq::E1, sq::G1, FLAG_KING_CASTLE, Piece::King));
                 }
             }
-            // Queenside
             if board.castling & WQ_CASTLE != 0 {
                 let between = square_bb(sq::D1) | square_bb(sq::C1) | square_bb(sq::B1);
                 if all_occ & between == 0
@@ -800,7 +731,6 @@ fn generate_castles(board: &Board, list: &mut MoveList, us: Color, all_occ: Bitb
             }
         }
         Color::Black => {
-            // Kingside
             if board.castling & BK_CASTLE != 0 {
                 let between = square_bb(sq::F8) | square_bb(sq::G8);
                 if all_occ & between == 0
@@ -811,7 +741,6 @@ fn generate_castles(board: &Board, list: &mut MoveList, us: Color, all_occ: Bitb
                     list.push(Move::new(sq::E8, sq::G8, FLAG_KING_CASTLE, Piece::King));
                 }
             }
-            // Queenside
             if board.castling & BQ_CASTLE != 0 {
                 let between = square_bb(sq::D8) | square_bb(sq::C8) | square_bb(sq::B8);
                 if all_occ & between == 0
@@ -826,8 +755,6 @@ fn generate_castles(board: &Board, list: &mut MoveList, us: Color, all_occ: Bitb
     }
 }
 
-/// Perft: count the number of leaf nodes at a given depth.
-/// Used to verify move generation correctness.
 pub fn perft(board: &mut Board, depth: u32) -> u64 {
     if depth == 0 {
         return 1;
@@ -847,7 +774,6 @@ pub fn perft(board: &mut Board, depth: u32) -> u64 {
     count
 }
 
-/// Divide perft: shows count per root move. Useful for debugging.
 pub fn perft_divide(board: &mut Board, depth: u32) -> u64 {
     let mut list = MoveList::new();
     generate_moves(board, &mut list);
@@ -882,7 +808,6 @@ mod tests {
         let board = Board::start_pos();
         let mut list = MoveList::new();
         generate_moves(&board, &mut list);
-        // Starting position should have 20 legal moves
         let mut legal = 0;
         let mut board_clone = board.clone();
         for i in 0..list.len() {
@@ -902,14 +827,11 @@ mod tests {
         assert_eq!(perft(&mut board, 2), 400);
         assert_eq!(perft(&mut board, 3), 8902);
         assert_eq!(perft(&mut board, 4), 197281);
-        // Depth 5 takes a bit longer but is a great validation
-        // assert_eq!(perft(&mut board, 5), 4865609);
     }
 
     #[test]
     fn test_perft_kiwipete() {
         setup();
-        // Position 2: "Kiwipete" — rich in tactical elements
         let mut board = Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1").unwrap();
         assert_eq!(perft(&mut board, 1), 48);
         assert_eq!(perft(&mut board, 2), 2039);
@@ -948,14 +870,14 @@ mod tests {
     fn test_knight_attacks_center() {
         setup();
         let attacks = knight_attacks(sq::E4);
-        assert_eq!(popcount(attacks), 8); // Knight in center attacks 8 squares
+        assert_eq!(popcount(attacks), 8);
     }
 
     #[test]
     fn test_knight_attacks_corner() {
         setup();
         let attacks = knight_attacks(sq::A1);
-        assert_eq!(popcount(attacks), 2); // Knight in corner attacks 2 squares
+        assert_eq!(popcount(attacks), 2);
     }
 
     #[test]
@@ -969,7 +891,6 @@ mod tests {
     fn test_bishop_attacks_empty() {
         setup();
         let attacks = bishop_attacks(sq::E4, 0);
-        // Bishop on e4 with no blockers: d3,c2,b1 + f5,g6,h7 + f3,g2,h1 + d5,c6,b7,a8
         assert_eq!(popcount(attacks), 13);
     }
 
@@ -977,7 +898,6 @@ mod tests {
     fn test_rook_attacks_empty() {
         setup();
         let attacks = rook_attacks(sq::E4, 0);
-        // Rook on e4 with no blockers: 7+7 = 14 squares
         assert_eq!(popcount(attacks), 14);
     }
 }

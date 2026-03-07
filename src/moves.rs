@@ -1,34 +1,9 @@
-/// Move representation — packed into a u32 for efficiency.
-///
-/// Bit layout (32 bits total):
-///   bits  0-5:   from square (0-63)
-///   bits  6-11:  to square (0-63)
-///   bits 12-15:  flags (captures, promotions, castles, etc.)
-///   bits 16-19:  moved piece type (0-5)
-///   bits 20-23:  captured piece type (0-5, valid only if capture flag set)
-///
-/// Flags encoding:
-///   0000 = quiet move
-///   0001 = double pawn push
-///   0010 = king castle
-///   0011 = queen castle
-///   0100 = capture
-///   0101 = en passant capture
-///   1000 = knight promotion
-///   1001 = bishop promotion
-///   1010 = rook promotion
-///   1011 = queen promotion
-///   1100 = knight promotion capture
-///   1101 = bishop promotion capture
-///   1110 = rook promotion capture
-///   1111 = queen promotion capture
 
 use crate::bitboard::{self, Piece};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Move(pub u32);
 
-// Flag constants
 pub const FLAG_QUIET: u32       = 0b0000;
 pub const FLAG_DOUBLE_PAWN: u32 = 0b0001;
 pub const FLAG_KING_CASTLE: u32 = 0b0010;
@@ -143,7 +118,6 @@ impl Move {
         }
     }
 
-    /// Convert to UCI string (e.g., "e2e4", "e7e8q")
     pub fn to_uci(self) -> String {
         let from = bitboard::square_name(self.from_sq());
         let to = bitboard::square_name(self.to_sq());
@@ -170,7 +144,6 @@ impl std::fmt::Display for Move {
     }
 }
 
-/// A list of moves, stack-allocated for performance
 pub struct MoveList {
     pub moves: [Move; 256],
     pub len: usize,

@@ -1,8 +1,3 @@
-/// Experience-based learning: Nagato remembers positions from past games.
-///
-/// After each game, notable positions (PV nodes, large eval swings) are persisted
-/// to disk. In future games, the stored best move and score act as hints — improving
-/// move ordering and providing a small eval correction when we've "been here before."
 
 use crate::moves::Move;
 
@@ -10,11 +5,6 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-// ============================================================
-// Game result (from engine's perspective)
-// ============================================================
-
-/// Outcome of a finished game, from the engine's perspective.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GameResult {
     Win,
@@ -22,11 +12,6 @@ pub enum GameResult {
     Loss,
 }
 
-// ============================================================
-// Experience entry
-// ============================================================
-
-/// A single piece of experience: what we learned about a position.
 #[derive(Clone, Copy, Debug)]
 pub struct ExpEntry {
     pub hash: u64,
@@ -34,20 +19,11 @@ pub struct ExpEntry {
     pub depth: i8,
     pub score: i16,
     pub game_result: f32,
-    /// How many times we've seen this position across games
     pub count: u16,
 }
 
-// ============================================================
-// Experience table
-// ============================================================
+const EXP_TABLE_SIZE: usize = 1 << 16;
 
-/// Fixed number of buckets — kept small so the file stays portable.
-/// Each bucket holds one entry (direct-mapped). Collisions are resolved
-/// by keeping the higher-depth entry.
-const EXP_TABLE_SIZE: usize = 1 << 16; // 65536 entries
-
-/// The experience table: a position cache that persists across games.
 pub struct ExpTable {
     entries: Vec<Option<ExpEntry>>,
 }
@@ -64,33 +40,26 @@ impl ExpTable {
         (hash as usize) % EXP_TABLE_SIZE
     }
 
-    /// Look up a position's experience. Returns None if we've never seen it.
     pub fn probe(&self, hash: u64) -> Option<&ExpEntry> {
         self.entries[Self::index(hash)]
             .as_ref()
             .filter(|e| e.hash == hash)
     }
 
-    /// Record or update experience for a position.
-    /// If we've seen it before, we keep the deeper entry and increment the count.
     pub fn store(&mut self, entry: ExpEntry) {
         let idx = Self::index(entry.hash);
         if let Some(existing) = &mut self.entries[idx] {
             if existing.hash == entry.hash {
-                // Same position — merge: keep deeper search, accumulate count
                 existing.count = existing.count.saturating_add(1);
-                // Blend game result as a running average
                 let n = existing.count as f32;
                 existing.game_result =
                     existing.game_result * ((n - 1.0) / n) + entry.game_result * (1.0 / n);
-                // Update move/score only if the new entry searched deeper
                 if entry.depth >= existing.depth {
                     existing.best_move = entry.best_move;
                     existing.depth = entry.depth;
                     existing.score = entry.score;
                 }
             } else if entry.depth >= existing.depth {
-                // Collision with a different position — replace if deeper
                 self.entries[idx] = Some(entry);
             }
         } else {
@@ -98,7 +67,6 @@ impl ExpTable {
         }
     }
 
-    /// Number of occupied slots (for diagnostics).
     pub fn len(&self) -> usize {
         self.entries.iter().filter(|e| e.is_some()).count()
     }
@@ -108,41 +76,21 @@ impl ExpTable {
     }
 }
 
-// ============================================================
-// Binary file persistence
-// ============================================================
-//
-// File format (nagato.exp):
-//   Magic:   4 bytes "NEXP"
-//   Version: 1 byte
-//   Count:   4 bytes (u32 LE) — number of entries
-//   Entries: count × 24 bytes each:
-//     hash:        8 bytes (u64 LE)
-//     best_move:   4 bytes (u32 LE — Move raw bits)
-//     depth:       1 byte  (i8)
-//     score:       2 bytes (i16 LE)
-//     game_result: 4 bytes (f32 LE)
-//     count:       2 bytes (u16 LE)
-//     _padding:    3 bytes (reserved)
-
 const EXP_MAGIC: &[u8; 4] = b"NEXP";
 const EXP_VERSION: u8 = 1;
 const ENTRY_BYTES: usize = 24;
 
 impl ExpTable {
-    /// Save all non-empty entries to a binary file.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         let file = File::create(path)?;
         let mut w = BufWriter::new(file);
 
-        // Header
         w.write_all(EXP_MAGIC)?;
         w.write_all(&[EXP_VERSION])?;
 
         let occupied: Vec<&ExpEntry> = self.entries.iter().filter_map(|e| e.as_ref()).collect();
         w.write_all(&(occupied.len() as u32).to_le_bytes())?;
 
-        // Entries
         for e in &occupied {
             w.write_all(&e.hash.to_le_bytes())?;
             w.write_all(&e.best_move.0.to_le_bytes())?;
@@ -150,14 +98,13 @@ impl ExpTable {
             w.write_all(&e.score.to_le_bytes())?;
             w.write_all(&e.game_result.to_le_bytes())?;
             w.write_all(&e.count.to_le_bytes())?;
-            w.write_all(&[0u8; 3])?; // padding
+            w.write_all(&[0u8; 3])?;
         }
 
         w.flush()?;
         Ok(())
     }
 
-    /// Load entries from a binary file, merging into the current table.
     pub fn load(&mut self, path: &Path) -> io::Result<usize> {
         if !path.exists() {
             return Ok(0);
@@ -197,7 +144,6 @@ impl ExpTable {
             let score = i16::from_le_bytes(buf[13..15].try_into().unwrap());
             let game_result = f32::from_le_bytes(buf[15..19].try_into().unwrap());
             let entry_count = u16::from_le_bytes(buf[19..21].try_into().unwrap());
-            // buf[21..24] is padding
 
             self.store(ExpEntry {
                 hash,
@@ -214,12 +160,6 @@ impl ExpTable {
     }
 }
 
-// ============================================================
-// Game recorder
-// ============================================================
-
-/// A snapshot of one position during a game.
-/// We don't know the game result yet — that gets filled in at the end.
 #[derive(Clone, Copy)]
 struct PositionRecord {
     hash: u64,
@@ -229,12 +169,8 @@ struct PositionRecord {
     side: u8,
 }
 
-/// Records notable positions as the engine plays a game.
-/// When the game ends, we learn the outcome and flush everything
-/// into the experience table.
 pub struct GameRecorder {
     positions: Vec<PositionRecord>,
-    /// Which color Nagato is playing (set when the first "go" arrives)
     our_color: Option<u8>,
 }
 
@@ -246,17 +182,13 @@ impl GameRecorder {
         }
     }
 
-    /// Call this when the engine starts thinking.
-    /// `side` is the color to move (0 = White, 1 = Black).
     pub fn set_our_color(&mut self, side: u8) {
         if self.our_color.is_none() {
             self.our_color = Some(side);
         }
     }
 
-    /// Record a position after the engine finishes searching it.
     pub fn record(&mut self, hash: u64, best_move: Move, depth: i8, score: i16, side: u8) {
-        // Only record positions searched to a reasonable depth
         if depth < 4 {
             return;
         }
@@ -269,8 +201,6 @@ impl GameRecorder {
         });
     }
 
-    /// Flush all recorded positions into the experience table
-    /// now that we know how the game ended.
     pub fn flush(&mut self, table: &mut ExpTable, result: GameResult) {
         let our_color = match self.our_color {
             Some(c) => c,
@@ -281,7 +211,6 @@ impl GameRecorder {
         };
 
         for pos in &self.positions {
-            // Game result from the perspective of the side to move in this position
             let result_for_side = if pos.side == our_color {
                 match result {
                     GameResult::Win => 1.0f32,
@@ -289,7 +218,6 @@ impl GameRecorder {
                     GameResult::Loss => 0.0,
                 }
             } else {
-                // Opponent was to move — flip the result
                 match result {
                     GameResult::Win => 0.0f32,
                     GameResult::Draw => 0.5,
@@ -311,13 +239,11 @@ impl GameRecorder {
         self.our_color = None;
     }
 
-    /// Discard recorded positions without learning (e.g. game aborted).
     pub fn clear(&mut self) {
         self.positions.clear();
         self.our_color = None;
     }
 
-    /// How many positions have been recorded this game.
     pub fn recorded_count(&self) -> usize {
         self.positions.len()
     }
@@ -376,11 +302,10 @@ mod tests {
     #[test]
     fn test_merge_blends_game_result() {
         let mut table = ExpTable::new();
-        table.store(make_entry(0xBBBB, 8, 100, 1.0)); // win
-        table.store(make_entry(0xBBBB, 8, 100, 0.0)); // loss
+        table.store(make_entry(0xBBBB, 8, 100, 1.0));
+        table.store(make_entry(0xBBBB, 8, 100, 0.0));
 
         let p = table.probe(0xBBBB).unwrap();
-        // Running average: (1.0 * 1/2) + (0.0 * 1/2) = 0.5
         assert!((p.game_result - 0.5).abs() < 0.01, "game result should blend to ~0.5");
     }
 
@@ -410,7 +335,6 @@ mod tests {
         assert_eq!(p3.depth, 7);
         assert!((p3.game_result - 0.5).abs() < 0.01);
 
-        // Cleanup
         let _ = std::fs::remove_file(&path);
     }
 
@@ -426,11 +350,9 @@ mod tests {
         let mut recorder = GameRecorder::new();
         recorder.set_our_color(0);
 
-        // Depth 3 — should be ignored
         recorder.record(0xAAAA, MOVE_NONE, 3, 100, 0);
         assert_eq!(recorder.recorded_count(), 0);
 
-        // Depth 4 — should be recorded
         recorder.record(0xBBBB, MOVE_NONE, 4, 200, 0);
         assert_eq!(recorder.recorded_count(), 1);
     }
@@ -439,20 +361,16 @@ mod tests {
     fn test_game_recorder_flush_win() {
         let mut recorder = GameRecorder::new();
         let mut table = ExpTable::new();
-        recorder.set_our_color(0); // We're white
+        recorder.set_our_color(0);
 
-        // Record a position where white was to move
         recorder.record(0xAAAA, MOVE_NONE, 8, 100, 0);
-        // Record a position where black was to move
         recorder.record(0xBBBB, MOVE_NONE, 6, -50, 1);
 
         recorder.flush(&mut table, GameResult::Win);
 
-        // White's position: we won, so game_result = 1.0
         let p1 = table.probe(0xAAAA).unwrap();
         assert!((p1.game_result - 1.0).abs() < 0.01);
 
-        // Black's position: we (white) won, so from black's perspective = 0.0
         let p2 = table.probe(0xBBBB).unwrap();
         assert!((p2.game_result - 0.0).abs() < 0.01);
     }

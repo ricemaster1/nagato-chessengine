@@ -1,10 +1,5 @@
-/// Bitboard type: a 64-bit integer where each bit represents a square.
-/// Bit 0 = A1, Bit 1 = B1, ..., Bit 7 = H1, Bit 8 = A2, ..., Bit 63 = H8
 pub type Bitboard = u64;
 
-// ============================================================
-// Square indices (rank-file mapping: index = rank*8 + file)
-// ============================================================
 #[rustfmt::skip]
 pub const SQUARE_NAMES: [&str; 64] = [
     "a1","b1","c1","d1","e1","f1","g1","h1",
@@ -37,9 +32,6 @@ pub mod sq {
     pub const E8: u8 = 60; pub const F8: u8 = 61; pub const G8: u8 = 62; pub const H8: u8 = 63;
 }
 
-// ============================================================
-// File and Rank masks
-// ============================================================
 pub const FILE_A: Bitboard = 0x0101010101010101;
 pub const FILE_B: Bitboard = FILE_A << 1;
 pub const FILE_C: Bitboard = FILE_A << 2;
@@ -67,9 +59,6 @@ pub const NOT_FILE_H: Bitboard = !FILE_H;
 pub const NOT_FILE_AB: Bitboard = !(FILE_A | FILE_B);
 pub const NOT_FILE_GH: Bitboard = !(FILE_G | FILE_H);
 
-// ============================================================
-// Piece and Color types
-// ============================================================
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
     White = 0,
@@ -137,10 +126,6 @@ impl Piece {
 
 pub const PIECE_COUNT: usize = 6;
 pub const COLOR_COUNT: usize = 2;
-
-// ============================================================
-// Bitboard utility functions
-// ============================================================
 
 #[inline]
 pub fn set_bit(bb: Bitboard, sq: u8) -> Bitboard {

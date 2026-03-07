@@ -1,30 +1,3 @@
-/// Data generation for NNUE training.
-///
-/// Runs self-play games using the current HCE evaluation, recording
-/// (position, search_score, game_result) tuples to a binary file.
-///
-/// Binary format per entry (32 bytes):
-///   - FEN-compressed position: 24 bytes (custom packed format)
-///   - search score: i16 (2 bytes) — centipawns from STM perspective
-///   - game result: i8 (1 byte) — 1=white win, 0=draw, -1=black win
-///   - padding: 5 bytes
-///
-/// We use a simpler "packed board" representation:
-///   - 32 bytes per piece-square encoding (4 bits per square, 64 squares = 32 bytes)
-///     But that's complex. Instead we use a compact text format.
-///
-/// Actually, for simplicity and portability, we'll write to a simple binary format:
-///   - Each entry is exactly 40 bytes:
-///     - 32 bytes: piece list encoding (piece_on_sq[64] as 4-bit nibbles = 32 bytes)
-///       Encoding: 0=empty, 1=WP,2=WN,3=WB,4=WR,5=WQ,6=WK,7=BP,8=BN,9=BB,10=BR,11=BQ,12=BK
-///     - 1 byte: side to move (0=white, 1=black)
-///     - 1 byte: castling rights
-///     - 1 byte: en passant file (0-7, or 255 for none)
-///     - 1 byte: padding
-///     - 2 bytes: score (i16, centipawns from white's perspective)
-///     - 2 bytes: game result + wdl encoding:
-///       - result: i8 (1=white win, 0=draw, -1=black win)
-///       - padding: 1 byte
 
 use crate::bitboard::*;
 use crate::board::Board;
@@ -57,9 +30,9 @@ fn pack_board(board: &Board) -> [u8; 32] {
         };
         let byte_idx = sq as usize / 2;
         if sq % 2 == 0 {
-            packed[byte_idx] |= nibble; // low nibble
+            packed[byte_idx] |= nibble;
         } else {
-            packed[byte_idx] |= nibble << 4; // high nibble
+            packed[byte_idx] |= nibble << 4;
         }
     }
     packed
@@ -97,8 +70,8 @@ pub fn unpack_board(packed: &[u8; 32], side: Color, castling: u8, ep_file: u8) -
     board.castling = castling;
     if ep_file < 8 {
         let ep_rank = match side {
-            Color::White => 5u8, // ep target is on rank 6 (index 5)
-            Color::Black => 2u8, // ep target is on rank 3 (index 2)
+            Color::White => 5u8,
+            Color::Black => 2u8,
         };
         board.ep_square = Some(make_square(ep_file, ep_rank));
     }
@@ -107,21 +80,21 @@ pub fn unpack_board(packed: &[u8; 32], side: Color, castling: u8, ep_file: u8) -
 }
 fn write_entry(buf: &mut Vec<u8>, board: &Board, score_white: i16, result: i8) {
     let packed = pack_board(board);
-    buf.extend_from_slice(&packed);  // 32 bytes
-    buf.push(board.side as u8);       // 1 byte
-    buf.push(board.castling);         // 1 byte
-    buf.push(board.ep_square.map_or(255, |sq| file_of(sq))); // 1 byte
-    buf.push(0);                      // padding
-    buf.extend_from_slice(&score_white.to_le_bytes()); // 2 bytes
-    buf.push(result as u8);           // 1 byte
-    buf.push(0);                      // padding
+    buf.extend_from_slice(&packed);
+    buf.push(board.side as u8);
+    buf.push(board.castling);
+    buf.push(board.ep_square.map_or(255, |sq| file_of(sq)));
+    buf.push(0);
+    buf.extend_from_slice(&score_white.to_le_bytes());
+    buf.push(result as u8);
+    buf.push(0);
     debug_assert_eq!(buf.len() % ENTRY_SIZE, 0);
 }
 pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32) {
     use rand::Rng;
 
-    let mut tt = search::TranspositionTable::new(32); // Small TT for datagen
-    let exp = ExpTable::new(); // No experience for datagen
+    let mut tt = search::TranspositionTable::new(32);
+    let exp = ExpTable::new();
     let mut rng = rand::thread_rng();
     let mut buf: Vec<u8> = Vec::with_capacity(1024 * 1024);
     let mut total_positions = 0u64;
@@ -156,7 +129,7 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
                 break;
             }
         }
-        let mut result: i8 = 0; // 0 = draw
+        let mut result: i8 = 0;
         let mut consecutive_no_progress = 0u32;
 
         loop {
@@ -176,8 +149,8 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
             if !has_legal {
                 if board.in_check() {
                     result = match board.side {
-                        Color::White => -1, // Black wins
-                        Color::Black => 1,  // White wins
+                        Color::White => -1,
+                        Color::Black => 1,
                     };
                 }
                 break;

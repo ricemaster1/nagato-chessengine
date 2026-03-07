@@ -1,5 +1,3 @@
-/// UCI (Universal Chess Interface) protocol implementation.
-/// This allows the engine to communicate with any UCI-compatible GUI.
 
 use crate::bitboard::*;
 use crate::board::Board;
@@ -18,15 +16,13 @@ const ENGINE_AUTHOR: &str = "Nagato Team";
 pub fn uci_loop() {
     let stdin = io::stdin();
     let mut board = Board::start_pos();
-    let mut tt = TranspositionTable::new(64); // 64 MB default
+    let mut tt = TranspositionTable::new(64);
 
-    // Experience-based learning
     let mut exp_path = PathBuf::from("nagato.exp");
     let mut exp_table = ExpTable::new();
     let mut recorder = GameRecorder::new();
     let mut use_experience = true;
 
-    // Load experience from previous sessions
     match exp_table.load(&exp_path) {
         Ok(n) if n > 0 => eprintln!("info string loaded {} experience entries", n),
         Ok(_) => {}
@@ -61,9 +57,7 @@ pub fn uci_loop() {
                 println!("readyok");
             }
             "ucinewgame" => {
-                // Save any experience from the previous game before resetting
                 if use_experience && recorder.recorded_count() > 0 {
-                    // If we don't know the result, treat it as a draw
                     recorder.flush(&mut exp_table, learn::GameResult::Draw);
                     if let Err(e) = exp_table.save(&exp_path) {
                         eprintln!("info string could not save experience: {}", e);
@@ -83,7 +77,6 @@ pub fn uci_loop() {
                 }
                 let exp_ref = if use_experience { &exp_table } else { &ExpTable::new() };
                 let result = search::search(&mut board, &mut tt, exp_ref, time_ms, depth);
-                // Record position for experience learning
                 if use_experience {
                     recorder.record(
                         board.hash,
@@ -97,7 +90,6 @@ pub fn uci_loop() {
             }
             "gameover" => {
                 if use_experience {
-                    // Non-standard but supported: "gameover win", "gameover loss", "gameover draw"
                     let result = if tokens.len() >= 2 {
                         match tokens[1] {
                             "win" => learn::GameResult::Win,
@@ -116,7 +108,6 @@ pub fn uci_loop() {
                 }
             }
             "quit" => {
-                // Flush any remaining experience before exiting
                 if use_experience && recorder.recorded_count() > 0 {
                     recorder.flush(&mut exp_table, learn::GameResult::Draw);
                     let _ = exp_table.save(&exp_path);
@@ -148,7 +139,6 @@ pub fn uci_loop() {
                 run_bench(&mut tt);
             }
             "datagen" => {
-                // datagen [games N] [depth D] [output FILE] [random_plies R]
                 let mut num_games = 1000u32;
                 let mut depth = 6i32;
                 let mut output = "training_data.bin".to_string();
@@ -172,14 +162,12 @@ pub fn uci_loop() {
                 parse_setoption(&tokens, &mut tt, &mut exp_path, &mut exp_table, &mut use_experience);
             }
             _ => {
-                // Unknown command, ignore silently per UCI spec
             }
         }
     }
 }
 
 fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable, exp_path: &mut PathBuf, exp_table: &mut ExpTable, use_experience: &mut bool) {
-    // Format: setoption name <name> [value <value>]
     let mut name = String::new();
     let mut value = String::new();
     let mut reading_name = false;
@@ -211,7 +199,6 @@ fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable, exp_path: &mut 
         "experiencefile" => {
             if !value.is_empty() {
                 *exp_path = PathBuf::from(&value);
-                // Reload experience from the new path
                 *exp_table = ExpTable::new();
                 match exp_table.load(exp_path) {
                     Ok(n) if n > 0 => eprintln!("info string loaded {} experience entries from {}", n, value),
@@ -252,7 +239,6 @@ fn parse_position(tokens: &[&str], board: &mut Board) {
         }
     }
 
-    // Parse moves
     if idx < tokens.len() && tokens[idx] == "moves" {
         idx += 1;
         while idx < tokens.len() {
@@ -283,7 +269,6 @@ fn parse_uci_move(board: &Board, uci: &str) -> Option<Move> {
         None
     };
 
-    // Generate all legal moves and find the matching one
     let mut list = MoveList::new();
     movegen::generate_moves(board, &mut list);
 
@@ -375,71 +360,57 @@ fn parse_go(tokens: &[&str], board: &Board) -> (u64, i32) {
         i += 1;
     }
 
-    // Handle "go mate N" — search for mate in N moves
     if mate_search > 0 {
-        depth = (mate_search * 2 + 2) as i32; // Enough ply to find the mate
-        time_ms = 0; // No time limit for mate search
+        depth = (mate_search * 2 + 2) as i32;
+        time_ms = 0;
         return (time_ms, depth);
     }
 
     if movetime > 0 {
         time_ms = movetime;
     } else if infinite {
-        time_ms = 0; // No time limit, but depth is still capped
+        time_ms = 0;
     } else {
-        // Time management
         let (our_time, our_inc) = match board.side {
             Color::White => (wtime, winc),
             Color::Black => (btime, binc),
         };
 
         if our_time > 0 {
-            // Estimate game phase from piece count
             let piece_count = board.all_occupancy.count_ones() as u64;
 
-            // Estimate moves remaining based on game phase
             let estimated_moves = if movestogo > 0 {
                 movestogo
             } else if piece_count > 24 {
-                // Opening: many pieces, moves are more "bookish"
                 35
             } else if piece_count > 14 {
-                // Middlegame: complex positions need more time
                 25
             } else {
-                // Endgame: fewer pieces, search is faster
                 20
             };
 
-            // Phase-based time scaling factor (spend more in middlegame)
             let phase_factor: f64 = if piece_count > 26 {
-                0.7  // Opening: play faster
+                0.7
             } else if piece_count > 14 {
-                1.3  // Middlegame: think harder
+                1.3
             } else {
-                0.9  // Endgame: search is deep but fast
+                0.9
             };
 
-            // Base time allocation
             let base_time = our_time / estimated_moves + our_inc * 3 / 4;
 
-            // Apply phase scaling
             time_ms = (base_time as f64 * phase_factor) as u64;
 
-            // Hard limits: never use more than 1/4 of remaining time
             time_ms = time_ms.min(our_time / 4);
 
-            // Minimum think time
             time_ms = time_ms.max(50);
 
-            // Safety margin to avoid flagging
             let safety = (our_time / 40).max(30).min(200);
             if time_ms > safety {
                 time_ms -= safety;
             }
         } else if depth == 64 {
-            // No time control and no explicit depth — use a sensible default
-            time_ms = 5000; // 5 seconds per move
+            time_ms = 5000;
         }
     }
 
@@ -512,7 +483,6 @@ mod tests {
         let mut board = Board::empty();
         let tokens: Vec<&str> = "position startpos moves e2e4 e7e5".split_whitespace().collect();
         parse_position(&tokens, &mut board);
-        // After 1.e4 e5
         assert_eq!(board.to_fen(), "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2");
     }
 }

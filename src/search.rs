@@ -1,4 +1,3 @@
-/// Search module: alpha-beta with iterative deepening, PVS, and various pruning techniques.
 
 use crate::bitboard::*;
 use crate::board::Board;
@@ -8,18 +7,14 @@ use crate::movegen;
 use crate::moves::*;
 use std::time::Instant;
 
-// ============================================================
-// Transposition Table — 4-entry bucket with depth-preferred replacement
-// ============================================================
-
 const TT_BUCKET_SIZE: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TTFlag {
-    None,  // Empty slot
+    None,
     Exact,
-    Alpha, // Upper bound (fail-low)
-    Beta,  // Lower bound (fail-high)
+    Alpha,
+    Beta,
 }
 
 #[derive(Clone, Copy)]
@@ -60,7 +55,6 @@ impl TranspositionTable {
         }
     }
 
-    /// Increment generation counter (called at the start of each search)
     pub fn new_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
     }
@@ -83,27 +77,18 @@ impl TranspositionTable {
         let bucket = &mut self.buckets[idx];
         let gen = self.generation;
 
-        // Find the best slot to replace:
-        // 1. Empty slot → use immediately
-        // 2. Same position → always update (keeps info fresh)
-        // 3. Otherwise → pick the least valuable entry to replace
-        //    Value = depth, penalized if from an old generation
         let mut replace_idx = 0;
         let mut worst_value = i32::MAX;
 
         for (i, entry) in bucket.iter().enumerate() {
-            // Empty slot — best possible target
             if entry.flag == TTFlag::None {
                 replace_idx = i;
                 break;
             }
-            // Same position — always replace
             if entry.hash == hash {
                 replace_idx = i;
                 break;
             }
-            // Score this slot: lower is more replaceable
-            // Entries from the current generation are more valuable
             let age_penalty = if entry.generation != gen { 4 } else { 0 };
             let value = entry.depth as i32 - age_penalty;
             if value < worst_value {
@@ -129,10 +114,6 @@ impl TranspositionTable {
     }
 }
 
-// ============================================================
-// Search state
-// ============================================================
-
 pub struct SearchInfo {
     pub nodes: u64,
     pub start_time: Instant,
@@ -140,17 +121,12 @@ pub struct SearchInfo {
     pub max_depth: i32,
     pub stopped: bool,
 
-    // Killer moves: quiet moves that caused a beta cutoff
-    pub killers: [[Move; 2]; 128], // [ply][slot]
+    pub killers: [[Move; 2]; 128],
 
-    // History heuristic: indexed by [color][from][to]
     pub history: [[[i32; 64]; 64]; 2],
 
-    // Counter move heuristic: indexed by [piece_that_moved_last][to_sq_of_last_move]
-    // Stores the quiet move that refuted the opponent's last move
     pub counter_moves: [[Move; 64]; 6],
 
-    // Static eval at each ply, for "improving" detection
     pub eval_stack: [i32; 128],
 }
 
@@ -173,7 +149,6 @@ impl SearchInfo {
         self.nodes = 0;
         self.stopped = false;
         self.killers = [[MOVE_NONE; 2]; 128];
-        // Age history scores instead of clearing
         for c in 0..2 {
             for f in 0..64 {
                 for t in 0..64 {
@@ -181,7 +156,6 @@ impl SearchInfo {
                 }
             }
         }
-        // Counter moves persist across iterations (not reset per depth)
     }
 
     #[inline]
@@ -194,16 +168,9 @@ impl SearchInfo {
     }
 }
 
-// ============================================================
-// ============================================================
-// Move ordering
-// ============================================================
-
 fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt_move: Move, exp: &ExpTable, prev_move: Move) -> Vec<i32> {
-    // Probe experience once per position
     let exp_move = exp.probe(board.hash).map(|e| e.best_move);
 
-    // Look up the counter move for the opponent's previous move
     let counter = if !prev_move.is_null() {
         let cm = info.counter_moves[prev_move.piece().index()][prev_move.to_sq() as usize];
         if cm.is_null() { None } else { Some(cm) }
@@ -216,17 +183,15 @@ fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt
         let m = list.moves[i];
 
         if m.0 == tt_move.0 && !tt_move.is_null() {
-            scores[i] = 10_000_000; // TT move first
+            scores[i] = 10_000_000;
         } else if exp_move.is_some() && m.0 == exp_move.unwrap().0 && !exp_move.unwrap().is_null() {
-            scores[i] = 5_000_000; // Experience best move — between TT and captures
+            scores[i] = 5_000_000;
         } else if m.is_capture() || m.is_en_passant() {
             let see_val = eval::see(board, m);
             if see_val >= 0 {
-                // Winning/equal captures: above killers, ordered by MVV-LVA
                 let cap_score = 1_000_000 + eval::mvv_lva_score(m);
                 scores[i] = cap_score;
             } else {
-                // Losing captures: below killers and history, ordered by SEE
                 scores[i] = -100_000 + see_val;
             }
         } else if m.is_promotion() {
@@ -236,16 +201,14 @@ fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt
         } else if ply < 128 && m.0 == info.killers[ply][1].0 {
             scores[i] = 700_000;
         } else if counter.is_some() && m.0 == counter.unwrap().0 {
-            scores[i] = 650_000; // Counter move — between killer 2 and history
+            scores[i] = 650_000;
         } else {
-            // History heuristic
             scores[i] = info.history[board.side.index()][m.from_sq() as usize][m.to_sq() as usize];
         }
     }
     scores
 }
 
-/// Pick the best-scored move and swap it to position `start`
 fn pick_move(list: &mut MoveList, scores: &mut [i32], start: usize) {
     let mut best_idx = start;
     let mut best_score = scores[start];
@@ -261,10 +224,6 @@ fn pick_move(list: &mut MoveList, scores: &mut [i32], start: usize) {
     }
 }
 
-// ============================================================
-// Quiescence search
-// ============================================================
-
 fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInfo, _exp: &ExpTable) -> i32 {
     info.nodes += 1;
     info.check_time();
@@ -278,8 +237,7 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInf
         return beta;
     }
 
-    // Delta pruning: if even capturing the best piece can't raise alpha, prune
-    let big_delta = eval::QUEEN_VALUE + 200; // Queen + some margin
+    let big_delta = eval::QUEEN_VALUE + 200;
     if stand_pat + big_delta < alpha {
         return alpha;
     }
@@ -291,7 +249,6 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInf
     let mut list = MoveList::new();
     movegen::generate_captures(board, &mut list);
 
-    // Simple move ordering for captures: MVV-LVA
     let mut scores: Vec<i32> = (0..list.len())
         .map(|i| eval::mvv_lva_score(list.moves[i]))
         .collect();
@@ -300,7 +257,6 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInf
         pick_move(&mut list, &mut scores, i);
         let m = list.moves[i];
 
-        // SEE pruning: skip clearly losing captures
         if eval::see(board, m) < 0 {
             continue;
         }
@@ -327,10 +283,6 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInf
     alpha
 }
 
-// ============================================================
-// Main alpha-beta search with PVS
-// ============================================================
-
 fn alpha_beta(
     board: &mut Board,
     tt: &mut TranspositionTable,
@@ -343,13 +295,11 @@ fn alpha_beta(
     do_null: bool,
     prev_move: Move,
 ) -> i32 {
-    // Check extension: extend search when in check
     let in_check = board.in_check();
     if in_check {
         depth += 1;
     }
 
-    // Drop into quiescence at depth 0
     if depth <= 0 {
         return quiescence(board, alpha, beta, info, exp);
     }
@@ -360,12 +310,10 @@ fn alpha_beta(
         return 0;
     }
 
-    // Draw detection: 50-move rule
     if board.halfmove >= 100 {
         return 0;
     }
 
-    // Draw detection: repetition (simplified — check history)
     if ply > 0 {
         let hash = board.hash;
         let start = if board.history.len() > board.halfmove as usize {
@@ -378,13 +326,12 @@ fn alpha_beta(
             if board.history[i].hash == hash {
                 reps += 1;
                 if reps >= 1 {
-                    return 0; // Draw by repetition
+                    return 0;
                 }
             }
         }
     }
 
-    // Mate distance pruning
     let mate_val = MATE_SCORE - ply as i32;
     if alpha >= mate_val {
         return alpha;
@@ -393,7 +340,6 @@ fn alpha_beta(
         return beta;
     }
 
-    // TT probe
     let mut tt_move = MOVE_NONE;
     if let Some(entry) = tt.probe(board.hash) {
         tt_move = entry.best_move;
@@ -411,37 +357,25 @@ fn alpha_beta(
                         return beta;
                     }
                 }
-                TTFlag::None => {} // unreachable — probe filters empty slots
+                TTFlag::None => {}
             }
         }
     }
 
-    // PV node detection: a node where the search window is wider than a null window
     let is_pv = beta - alpha > 1;
 
-    // Experience probe — compute a small eval correction if we've been here before
     let exp_correction = if let Some(exp_entry) = exp.probe(board.hash) {
-        // Use experience best move as fallback if TT has nothing
         if tt_move.is_null() && !exp_entry.best_move.is_null() {
             tt_move = exp_entry.best_move;
         }
-        // Correction: game_result is 0.0 (loss) to 1.0 (win), expected is 0.5.
-        // Nudge eval toward reality. Scale by confidence (more games = stronger).
-        let confidence = (exp_entry.count as f32).min(16.0) / 16.0; // caps at 16 games
-        let outcome_delta = exp_entry.game_result - 0.5; // -0.5 to +0.5
-        (outcome_delta * 60.0 * confidence) as i32 // max ±30cp
+        let confidence = (exp_entry.count as f32).min(16.0) / 16.0;
+        let outcome_delta = exp_entry.game_result - 0.5;
+        (outcome_delta * 60.0 * confidence) as i32
     } else {
         0
     };
 
-    // Null move pruning
     if do_null && !in_check && depth >= 3 && ply > 0 {
-        // Skip null move in zugzwang-prone positions.
-        // Zugzwang is most dangerous in endgames with limited material:
-        //   - Only pawns + king
-        //   - Single minor piece + pawns
-        //   - Rook + pawns with no other pieces
-        // Safe to null-move if we have sufficient piece diversity.
         let us = board.side.index();
         let our_queens = board.pieces[us][Piece::Queen.index()];
         let our_rooks = board.pieces[us][Piece::Rook.index()];
@@ -453,9 +387,6 @@ fn alpha_beta(
         let minor_count = our_bishops.count_ones() + our_knights.count_ones();
         let major_count = our_rooks.count_ones() + our_queens.count_ones();
 
-        // Allow null move if:
-        //   - Has any non-pawn material AND (has a queen, or 2+ pieces, or rook+minor)
-        //   - This blocks: lone king, K+minor+pawns, K+rook+pawns (zugzwang prone)
         let null_safe = non_pawn_material != 0
             && (our_queens != 0
                 || (major_count + minor_count) >= 2
@@ -463,7 +394,7 @@ fn alpha_beta(
 
         if null_safe {
             board.make_null_move();
-            let r = if depth >= 6 { 3 } else { 2 }; // Adaptive null move reduction
+            let r = if depth >= 6 { 3 } else { 2 };
             let null_score = -alpha_beta(board, tt, info, exp, depth - 1 - r, -beta, -beta + 1, ply + 1, false, MOVE_NONE);
             board.unmake_null_move();
 
@@ -477,23 +408,18 @@ fn alpha_beta(
         }
     }
 
-    // Static evaluation for this node (used by RFP and improving detection)
     let static_eval = if !in_check {
         eval::evaluate(board) + exp_correction
     } else {
-        0 // Don't evaluate when in check
+        0
     };
 
-    // Store static eval in eval stack for improving detection
     if ply < 128 {
         info.eval_stack[ply] = static_eval;
     }
 
-    // "Improving" flag: our static eval is better than it was 2 plies ago.
-    // If improving, the position is trending in our favor → be less aggressive with pruning.
     let improving = !in_check && ply >= 2 && ply < 128 && static_eval > info.eval_stack[ply - 2];
 
-    // Reverse futility pruning (static eval pruning)
     if !in_check && depth <= 3 && ply > 0 {
         let margin = if improving { 100 * depth } else { 120 * depth };
         if static_eval - margin >= beta {
@@ -501,7 +427,6 @@ fn alpha_beta(
         }
     }
 
-    // Generate and search moves
     let mut list = MoveList::new();
     movegen::generate_moves(board, &mut list);
 
@@ -522,8 +447,6 @@ fn alpha_beta(
 
         let mut score;
 
-        // Late Move Reductions (LMR) — enhanced dynamic formula
-        // Skip LMR in very sparse endgames (5 or fewer pieces) — every move is critical
         let few_pieces = board.all_occupancy.count_ones() <= 5;
         if moves_searched >= 3
             && depth >= 3
@@ -533,53 +456,43 @@ fn alpha_beta(
             && !board.in_check()
             && !few_pieces
         {
-            // Base reduction from ln(depth) * ln(moves_searched)
             let ln_depth = (depth as f32).ln();
             let ln_moves = (moves_searched as f32).ln();
             let mut reduction = (0.75 + ln_depth * ln_moves / 2.5) as i32;
 
-            // PV nodes: reduce less (we want to search PV lines more carefully)
             if is_pv {
                 reduction -= 1;
             }
 
-            // Improving: reduce less when our eval is trending up
             if improving {
                 reduction -= 1;
             }
 
-            // History-based adjustment: scale by history score
             let hist_score = info.history[board.side.index()][m.from_sq() as usize][m.to_sq() as usize];
             if hist_score < -500 {
-                reduction += 1; // Bad history: reduce more
+                reduction += 1;
             } else if hist_score > 2000 {
-                reduction -= 1; // Strong history: reduce less
+                reduction -= 1;
             }
 
-            // Reduce less for killer moves
             if ply < 128 && (m.0 == info.killers[ply][0].0 || m.0 == info.killers[ply][1].0) {
                 reduction -= 1;
             }
 
-            // Clamp: at least 1 ply reduction, never reduce below depth 1
             reduction = reduction.clamp(1, depth - 2);
 
             let reduced_depth = (depth - 1 - reduction).max(1);
             score = -alpha_beta(board, tt, info, exp, reduced_depth, -alpha - 1, -alpha, ply + 1, true, m);
 
-            // Re-search at full depth if LMR score is above alpha
             if score > alpha {
                 score = -alpha_beta(board, tt, info, exp, depth - 1, -alpha - 1, -alpha, ply + 1, true, m);
             }
         } else if moves_searched > 0 {
-            // PVS: search with null window first
             score = -alpha_beta(board, tt, info, exp, depth - 1, -alpha - 1, -alpha, ply + 1, true, m);
         } else {
-            // First move: full window search
-            score = alpha + 1; // Force full search below
+            score = alpha + 1;
         }
 
-        // Full window re-search if needed
         if score > alpha {
             score = -alpha_beta(board, tt, info, exp, depth - 1, -beta, -alpha, ply + 1, true, m);
         }
@@ -599,18 +512,15 @@ fn alpha_beta(
                 alpha = score;
                 flag = TTFlag::Exact;
 
-                // Update history for quiet moves
                 if !m.is_capture() {
                     info.history[board.side.index()][m.from_sq() as usize][m.to_sq() as usize] += depth * depth;
                 }
 
                 if score >= beta {
-                    // Store killer moves and counter move on quiet beta cutoffs
                     if !m.is_capture() && ply < 128 {
                         info.killers[ply][1] = info.killers[ply][0];
                         info.killers[ply][0] = m;
 
-                        // Counter move: record this move as the refutation of opponent's last move
                         if !prev_move.is_null() {
                             info.counter_moves[prev_move.piece().index()][prev_move.to_sq() as usize] = m;
                         }
@@ -623,22 +533,17 @@ fn alpha_beta(
         }
     }
 
-    // Checkmate or stalemate
     if moves_searched == 0 {
         if in_check {
-            return -(MATE_SCORE - ply as i32); // Checkmate
+            return -(MATE_SCORE - ply as i32);
         } else {
-            return 0; // Stalemate
+            return 0;
         }
     }
 
     tt.store(board.hash, depth as i8, alpha, flag, best_move);
     alpha
 }
-
-// ============================================================
-// Iterative deepening
-// ============================================================
 
 pub struct SearchResult {
     pub best_move: Move,
@@ -655,19 +560,16 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, ti
     info.time_limit_ms = time_limit_ms;
     info.max_depth = max_depth;
 
-    // Increment TT generation for age-based replacement
     tt.new_generation();
 
     let mut best_move = MOVE_NONE;
     let mut best_score = 0;
 
-    // Iterative deepening
     for depth in 1..=max_depth {
         info.reset();
-        info.start_time = start_time; // Preserve the original start time
+        info.start_time = start_time;
         let _start_of_iteration = Instant::now();
 
-        // Aspiration windows
         let (mut alpha, mut beta) = if depth >= 4 {
             (best_score - 25, best_score + 25)
         } else {
@@ -682,7 +584,6 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, ti
                 break;
             }
 
-            // Widen window if we fail outside
             if score <= alpha {
                 alpha = -INFINITY;
             } else if score >= beta {
@@ -698,7 +599,6 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, ti
 
         best_score = score;
 
-        // Get best move from TT
         if let Some(entry) = tt.probe(board.hash) {
             best_move = entry.best_move;
         }
@@ -706,14 +606,12 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, ti
         let elapsed = info.start_time.elapsed().as_millis() as u64;
         let nps = if elapsed > 0 { info.nodes * 1000 / elapsed } else { 0 };
 
-        // UCI info output
         let score_str = if eval::is_mate_score(score) {
             format!("score mate {}", eval::mate_in(score))
         } else {
             format!("score cp {}", score)
         };
 
-        // Build PV from TT
         let pv = extract_pv(board, tt, depth);
 
         println!(
@@ -726,12 +624,10 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, ti
             pv,
         );
 
-        // If we found a forced mate, stop searching
         if eval::is_mate_score(score) {
             break;
         }
 
-        // Time management: if we've used more than half the time, stop
         if time_limit_ms > 0 && elapsed > time_limit_ms / 2 {
             break;
         }
@@ -748,7 +644,6 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, ti
     }
 }
 
-/// Extract the principal variation from the TT
 fn extract_pv(board: &mut Board, tt: &TranspositionTable, max_depth: i32) -> String {
     let mut pv_moves: Vec<Move> = Vec::new();
 
@@ -767,7 +662,6 @@ fn extract_pv(board: &mut Board, tt: &TranspositionTable, max_depth: i32) -> Str
         }
     }
 
-    // Unmake all moves in reverse to restore the board
     for i in (0..pv_moves.len()).rev() {
         board.unmake_move(pv_moves[i]);
     }
@@ -775,7 +669,6 @@ fn extract_pv(board: &mut Board, tt: &TranspositionTable, max_depth: i32) -> Str
     pv_moves.iter().map(|m| m.to_uci()).collect::<Vec<_>>().join(" ")
 }
 
-/// Properly extract PV by tracking moves
 pub fn get_pv(board: &mut Board, tt: &TranspositionTable, max_depth: i32) -> Vec<Move> {
     let mut pv = Vec::new();
     let mut moves_made = 0;
@@ -796,7 +689,6 @@ pub fn get_pv(board: &mut Board, tt: &TranspositionTable, max_depth: i32) -> Vec
         }
     }
 
-    // Unmake all moves in reverse
     for i in (0..moves_made).rev() {
         board.unmake_move(pv[i]);
     }
@@ -828,12 +720,10 @@ mod tests {
     #[test]
     fn test_search_mate_in_1() {
         setup();
-        // White to move, Qh7# is mate in 1
         let mut board = Board::from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4").unwrap();
         let mut tt = TranspositionTable::new(16);
         let exp = ExpTable::new();
         let result = search(&mut board, &mut tt, &exp, 5000, 6);
-        // Should find Qxf7# (scholar's mate)
         println!("Best move: {}, score: {}", result.best_move, result.score);
         assert!(eval::is_mate_score(result.score), "Should find mate");
     }
@@ -841,7 +731,6 @@ mod tests {
     #[test]
     fn test_search_avoid_blunder() {
         setup();
-        // Position where queen is hanging
         let mut board = Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1").unwrap();
         let mut tt = TranspositionTable::new(16);
         let exp = ExpTable::new();
@@ -852,7 +741,6 @@ mod tests {
     #[test]
     fn test_mate_in_2_back_rank() {
         setup();
-        // Back-rank mate in 2: 1. Re8+ Rxe8 2. Qxe8#
         let mut board = Board::from_fen("3r2k1/5ppp/8/8/8/8/4RPPP/4Q1K1 w - - 0 1").unwrap();
         let mut tt = TranspositionTable::new(16);
         let exp = ExpTable::new();
@@ -866,7 +754,6 @@ mod tests {
     #[test]
     fn test_mate_in_6_kqk() {
         setup();
-        // KQ vs K: forced mate in 6
         let mut board = Board::from_fen("8/4k3/8/8/2K5/8/8/Q7 w - - 0 1").unwrap();
         let mut tt = TranspositionTable::new(32);
         let exp = ExpTable::new();
@@ -880,7 +767,6 @@ mod tests {
     #[test]
     fn test_mate_in_7_kqk() {
         setup();
-        // KQ vs K: forced mate in 7 — verifies deep mate-finding capability
         let mut board = Board::from_fen("8/8/3k4/8/8/4K3/8/Q7 w - - 0 1").unwrap();
         let mut tt = TranspositionTable::new(32);
         let exp = ExpTable::new();
@@ -898,14 +784,12 @@ mod tests {
         let info = SearchInfo::new();
         let tt_move = MOVE_NONE;
 
-        // Without experience: all quiet moves scored by history (0 initially)
         let exp_empty = ExpTable::new();
         let mut list = MoveList::new();
         crate::movegen::generate_moves(&board, &mut list);
         let scores_no_exp = score_moves(&list, &board, &info, 0, tt_move, &exp_empty, MOVE_NONE);
 
-        // With experience: store a best move for the start position
-        let hints_move = list.moves[5]; // pick an arbitrary legal move
+        let hints_move = list.moves[5];
         let mut exp_filled = ExpTable::new();
         exp_filled.store(ExpEntry {
             hash: board.hash,
@@ -917,7 +801,6 @@ mod tests {
         });
         let scores_with_exp = score_moves(&list, &board, &info, 0, tt_move, &exp_filled, MOVE_NONE);
 
-        // The experience move should now be scored at 5_000_000
         let idx = (0..list.len()).find(|&i| list.moves[i].0 == hints_move.0).unwrap();
         assert_eq!(scores_no_exp[idx], 0, "Without experience, should be 0 (history)");
         assert_eq!(scores_with_exp[idx], 5_000_000, "With experience, should be 5M");
@@ -926,18 +809,12 @@ mod tests {
     #[test]
     fn test_experience_eval_correction() {
         setup();
-        // Verify that experience with a strong win record produces a positive correction
-        // and experience with losses produces a negative one. We check indirectly:
-        // searching the same position with "all wins" vs "all losses" experience
-        // should yield a higher score for the winning experience.
         let mut board = Board::start_pos();
         let mut tt = TranspositionTable::new(16);
 
-        // Search without experience
         let exp_empty = ExpTable::new();
         let result_neutral = search(&mut board, &mut tt, &exp_empty, 500, 4);
 
-        // Search with "winning" experience
         tt.clear();
         let mut exp_win = ExpTable::new();
         exp_win.store(ExpEntry {
@@ -945,12 +822,11 @@ mod tests {
             best_move: result_neutral.best_move,
             depth: 10,
             score: 50,
-            game_result: 1.0, // always won from here
+            game_result: 1.0,
             count: 16,
         });
         let result_win = search(&mut board, &mut tt, &exp_win, 500, 4);
 
-        // Search with "losing" experience
         tt.clear();
         let mut exp_loss = ExpTable::new();
         exp_loss.store(ExpEntry {
@@ -958,16 +834,12 @@ mod tests {
             best_move: result_neutral.best_move,
             depth: 10,
             score: 50,
-            game_result: 0.0, // always lost from here
+            game_result: 0.0,
             count: 16,
         });
         let result_loss = search(&mut board, &mut tt, &exp_loss, 500, 4);
 
-        // The "win" experience should produce a score >= "loss" experience
         println!("Neutral: {}, Win: {}, Loss: {}", result_neutral.score, result_win.score, result_loss.score);
-        // Note: the correction is small (max ±30cp) and only affects RFP, so
-        // the effect may be subtle. We just verify it doesn't crash and produces
-        // reasonable scores (all should be near 0 for start pos).
         assert!(result_win.score > -500 && result_win.score < 500, "Score should be reasonable");
         assert!(result_loss.score > -500 && result_loss.score < 500, "Score should be reasonable");
     }
