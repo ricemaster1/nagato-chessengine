@@ -26,4 +26,4 @@ pub use accumulator::{
     accumulator_move_q,
 };
 pub use features::{feature_index_white, feature_index_black};
-pub use network::{init, is_active, evaluate, evaluate_q, forward, forward_q};
+pub use network::{init, is_active, evaluate, evaluate_q, forward, forward_q, psqt_bucket};

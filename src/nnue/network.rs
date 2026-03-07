@@ -251,7 +251,17 @@ fn clipped_relu(x: f32) -> f32 {
     x.clamp(0.0, 1.0)
 }
 
-pub fn forward(acc: &Accumulator, side: Color) -> i32 {
+const PSQT_ALPHA: i32 = 125;
+const PSQT_BETA: i32 = 131;
+const PSQT_GAMMA: i32 = 128;
+
+#[inline]
+pub fn psqt_bucket(piece_count: u32) -> usize {
+    let count = piece_count.max(1) as usize;
+    ((count - 1) / 8).min(NUM_PSQT_BUCKETS - 1)
+}
+
+pub fn forward(acc: &Accumulator, side: Color, psqt: i32) -> i32 {
     let w = weights();
 
     let (stm_acc, opp_acc) = match side {
@@ -288,14 +298,21 @@ pub fn forward(acc: &Accumulator, side: Color) -> i32 {
         output += clipped_relu(l2_out[j]) * w.output_weights[j];
     }
 
-    (output * 400.0) as i32
+    let positional = (output * 400.0) as i32;
+    (PSQT_ALPHA as i64 * psqt as i64 + PSQT_BETA as i64 * positional as i64) as i32 / PSQT_GAMMA
 }
 
 pub fn evaluate(board: &Board, acc: &Accumulator) -> i32 {
-    forward(acc, board.side)
+    let bucket = psqt_bucket(board.piece_count());
+    let (stm_psqt, opp_psqt) = match board.side {
+        Color::White => (acc.psqt_white[bucket], acc.psqt_black[bucket]),
+        Color::Black => (acc.psqt_black[bucket], acc.psqt_white[bucket]),
+    };
+    let psqt = ((stm_psqt - opp_psqt) * 400.0) as i32;
+    forward(acc, board.side, psqt)
 }
 
-pub fn forward_q(acc: &AccumulatorQ, side: Color) -> i32 {
+pub fn forward_q(acc: &AccumulatorQ, side: Color, psqt: i32) -> i32 {
     let wq = weights_q();
 
     let (stm_acc, opp_acc) = match side {
@@ -308,16 +325,36 @@ pub fn forward_q(acc: &AccumulatorQ, side: Color) -> i32 {
 
     let output = simd::output_layer(&l2_out, &wq.out_weights, wq.out_bias);
 
-    (output * 400 / (QB as i64 * QB as i64)) as i32
+    let positional = (output * 400 / (QB as i64 * QB as i64)) as i32;
+    (PSQT_ALPHA as i64 * psqt as i64 + PSQT_BETA as i64 * positional as i64) as i32 / PSQT_GAMMA
 }
 
 pub fn evaluate_q(board: &Board, acc: &AccumulatorQ) -> i32 {
-    forward_q(acc, board.side)
+    let bucket = psqt_bucket(board.piece_count());
+    let (stm_psqt, opp_psqt) = match board.side {
+        Color::White => (acc.psqt_white[bucket], acc.psqt_black[bucket]),
+        Color::Black => (acc.psqt_black[bucket], acc.psqt_white[bucket]),
+    };
+    let psqt = (stm_psqt - opp_psqt) * 400 / (QA * QA);
+    forward_q(acc, board.side, psqt)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_psqt_bucket() {
+        assert_eq!(psqt_bucket(0), 0);
+        assert_eq!(psqt_bucket(1), 0);
+        assert_eq!(psqt_bucket(8), 0);
+        assert_eq!(psqt_bucket(9), 1);
+        assert_eq!(psqt_bucket(16), 1);
+        assert_eq!(psqt_bucket(17), 2);
+        assert_eq!(psqt_bucket(24), 2);
+        assert_eq!(psqt_bucket(25), 3);
+        assert_eq!(psqt_bucket(32), 3);
+    }
 
     #[test]
     fn test_clipped_relu() {
@@ -461,8 +498,8 @@ mod tests {
             acc_q.black[j] = (0.3 * QA as f32).round() as i16;
         }
 
-        let f32_result = forward(&acc_f, Color::White);
-        let q_result = forward_q(&acc_q, Color::White);
+        let f32_result = forward(&acc_f, Color::White, 0);
+        let q_result = forward_q(&acc_q, Color::White, 0);
 
         let diff = (f32_result - q_result).abs();
         assert!(diff <= 100, "f32={} q={} diff={} (uniform 0.01 weights have high quant error)", f32_result, q_result, diff);
@@ -479,7 +516,7 @@ mod tests {
         NNUE_LOADED.store(true, Ordering::Relaxed);
 
         let acc_q = AccumulatorQ::new();
-        let result = forward_q(&acc_q, Color::White);
+        let result = forward_q(&acc_q, Color::White, 0);
         assert_eq!(result, 0);
 
         NNUE_LOADED.store(false, Ordering::Relaxed);
@@ -512,13 +549,14 @@ mod tests {
             acc_q.black[j] = 100;
         }
 
-        let result = forward_q(&acc_q, Color::White);
+        let result = forward_q(&acc_q, Color::White, 0);
         let stm_pw: i32 = (200u16 as u32 * 200u16 as u32 >> 8) as i32;
         let opp_pw: i32 = (100u16 as u32 * 100u16 as u32 >> 8) as i32;
         let l2_dot = L1_PAIR as i32 * stm_pw * 1 + L1_PAIR as i32 * opp_pw * 1;
         let l2_crelu = std::cmp::min(l2_dot, QA * QB) / QA;
         let output_dot = L2_SIZE as i64 * l2_crelu as i64 * 1i64;
-        let expected = (output_dot * 400 / (QB as i64 * QB as i64)) as i32;
+        let positional = (output_dot * 400 / (QB as i64 * QB as i64)) as i32;
+        let expected = (PSQT_BETA as i64 * positional as i64) as i32 / PSQT_GAMMA;
         assert_eq!(result, expected, "result={} expected={}", result, expected);
 
         NNUE_LOADED.store(false, Ordering::Relaxed);
@@ -540,7 +578,7 @@ mod tests {
         let start = Instant::now();
         let mut sum = 0i64;
         for _ in 0..iterations {
-            sum += forward(&acc, Color::White) as i64;
+            sum += forward(&acc, Color::White, 0) as i64;
         }
         let elapsed = start.elapsed();
         let ns_per = elapsed.as_nanos() as f64 / iterations as f64;
@@ -595,7 +633,7 @@ mod tests {
         let start = Instant::now();
         let mut sum = 0i64;
         for _ in 0..iterations {
-            sum += forward_q(&acc_q, Color::White) as i64;
+            sum += forward_q(&acc_q, Color::White, 0) as i64;
         }
         let elapsed = start.elapsed();
         let ns_per = elapsed.as_nanos() as f64 / iterations as f64;

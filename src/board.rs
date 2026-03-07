@@ -251,6 +251,11 @@ impl Board {
         lsb(self.pieces[color.index()][Piece::King.index()])
     }
 
+    #[inline]
+    pub fn piece_count(&self) -> u32 {
+        popcount(self.all_occupancy)
+    }
+
     pub fn compute_hash(&self) -> u64 {
         let keys = zobrist::keys();
         let mut h: u64 = 0;
