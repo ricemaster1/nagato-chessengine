@@ -2,7 +2,7 @@ use crate::bitboard::Color;
 use crate::board::Board;
 use crate::nnue::features::{KING_BUCKETS, PER_BUCKET_FEATURES};
 
-use super::{L1_SIZE, L1_PAIR, L2_INPUT, L2_SIZE, INPUT_SIZE, QA, QB};
+use super::{L1_SIZE, L1_PAIR, L2_INPUT, L2_SIZE, INPUT_SIZE, NUM_PSQT_BUCKETS, QA, QB};
 use super::accumulator::{Accumulator, AccumulatorQ};
 use super::simd;
 
@@ -13,6 +13,7 @@ pub struct NnueWeights {
     pub l1_weights: Vec<[f32; L1_SIZE]>,
     pub version: u32,
     pub l1_biases: [f32; L1_SIZE],
+    pub psqt_weights: Vec<[f32; NUM_PSQT_BUCKETS]>,
     pub l2_weights: Vec<[f32; L2_SIZE]>,
     pub l2_biases: [f32; L2_SIZE],
     pub output_weights: [f32; L2_SIZE],
@@ -23,6 +24,7 @@ pub struct NnueWeightsQ {
     pub version: u32,
     pub ft_weights: Vec<[i16; L1_SIZE]>,
     pub ft_biases: [i16; L1_SIZE],
+    pub psqt_weights: Vec<[i32; NUM_PSQT_BUCKETS]>,
     pub l2_weights: Vec<[i8; L2_SIZE]>,
     pub l2_weights_t: [[i8; L2_INPUT]; L2_SIZE],
     pub l2_biases: [i32; L2_SIZE],
@@ -46,6 +48,13 @@ pub fn quantize_weights(w: &NnueWeights) -> NnueWeightsQ {
     let mut ft_biases = [0i16; L1_SIZE];
     for j in 0..L1_SIZE {
         ft_biases[j] = (w.l1_biases[j] * qa).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    }
+
+    let mut psqt_weights = vec![[0i32; NUM_PSQT_BUCKETS]; w.psqt_weights.len()];
+    for i in 0..w.psqt_weights.len() {
+        for b in 0..NUM_PSQT_BUCKETS {
+            psqt_weights[i][b] = (w.psqt_weights[i][b] * qa).round() as i32;
+        }
     }
 
     let concat = L2_INPUT;
@@ -79,6 +88,7 @@ pub fn quantize_weights(w: &NnueWeights) -> NnueWeightsQ {
         version: w.version,
         ft_weights,
         ft_biases,
+        psqt_weights,
         l2_weights,
         l2_weights_t,
         l2_biases,
@@ -185,6 +195,13 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
         l1_biases[j] = read_f32(&mut cursor, data)?;
     }
 
+    let mut psqt_weights = vec![[0.0f32; NUM_PSQT_BUCKETS]; l1_rows];
+    for i in 0..l1_rows {
+        for b in 0..NUM_PSQT_BUCKETS {
+            psqt_weights[i][b] = read_f32(&mut cursor, data)?;
+        }
+    }
+
     let concat_size = L2_INPUT;
     let mut l2_weights = vec![[0.0f32; L2_SIZE]; concat_size];
     for i in 0..concat_size {
@@ -208,6 +225,7 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
     let expected = 4 + 4
         + (l1_rows * L1_SIZE) * 4
         + L1_SIZE * 4
+        + (l1_rows * NUM_PSQT_BUCKETS) * 4
         + (concat_size * L2_SIZE) * 4
         + L2_SIZE * 4
         + L2_SIZE * 4
@@ -220,6 +238,7 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
         version,
         l1_weights,
         l1_biases,
+        psqt_weights,
         l2_weights,
         l2_biases,
         output_weights,
@@ -311,20 +330,22 @@ mod tests {
 
     #[test]
     fn test_weight_file_size() {
-        let expected_floats = INPUT_SIZE * L1_SIZE
+        let l1_rows = INPUT_SIZE;
+        let expected_floats = l1_rows * L1_SIZE
             + L1_SIZE
+            + l1_rows * NUM_PSQT_BUCKETS
             + L2_INPUT * L2_SIZE
             + L2_SIZE
             + L2_SIZE
             + 1;
         let expected_bytes = 8 + expected_floats * 4;
-        assert_eq!(expected_bytes, 820_492);
+        assert_eq!(expected_bytes, 832_780);
     }
 
     #[test]
     fn test_load_v1_roundtrip() {
         let l1_rows = INPUT_SIZE;
-        let total_floats = l1_rows * L1_SIZE + L1_SIZE + L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1;
+        let total_floats = l1_rows * L1_SIZE + L1_SIZE + l1_rows * NUM_PSQT_BUCKETS + L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1;
         let mut buf: Vec<u8> = Vec::with_capacity(8 + total_floats * 4);
         buf.extend_from_slice(b"NAGT");
         buf.extend_from_slice(&1u32.to_le_bytes());
@@ -342,7 +363,7 @@ mod tests {
     #[test]
     fn test_load_v2_roundtrip() {
         let l1_rows = KING_BUCKETS * PER_BUCKET_FEATURES;
-        let total_floats = l1_rows * L1_SIZE + L1_SIZE + L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1;
+        let total_floats = l1_rows * L1_SIZE + L1_SIZE + l1_rows * NUM_PSQT_BUCKETS + L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1;
         let mut buf: Vec<u8> = Vec::with_capacity(8 + total_floats * 4);
         buf.extend_from_slice(b"NAGT");
         buf.extend_from_slice(&2u32.to_le_bytes());
@@ -385,6 +406,7 @@ mod tests {
             version,
             l1_weights: vec![[0.01f32; L1_SIZE]; l1_rows],
             l1_biases: [0.0f32; L1_SIZE],
+            psqt_weights: vec![[0.0f32; NUM_PSQT_BUCKETS]; l1_rows],
             l2_weights: vec![[0.01f32; L2_SIZE]; L2_INPUT],
             l2_biases: [0.0f32; L2_SIZE],
             output_weights: [0.01f32; L2_SIZE],
@@ -469,6 +491,7 @@ mod tests {
             version: 1,
             l1_weights: vec![[0.0f32; L1_SIZE]; INPUT_SIZE],
             l1_biases: [0.0f32; L1_SIZE],
+            psqt_weights: vec![[0.0f32; NUM_PSQT_BUCKETS]; INPUT_SIZE],
             l2_weights: vec![[1.0 / QB as f32; L2_SIZE]; L2_INPUT],
             l2_biases: [0.0f32; L2_SIZE],
             output_weights: [1.0 / QB as f32; L2_SIZE],
