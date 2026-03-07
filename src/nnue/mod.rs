@@ -1,6 +1,7 @@
 pub mod features;
 pub mod accumulator;
 pub mod network;
+pub mod simd;
 
 pub const L1_SIZE: usize = 128;
 pub const L2_SIZE: usize = 32;

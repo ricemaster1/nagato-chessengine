@@ -4,6 +4,7 @@ use crate::nnue::features::{KING_BUCKETS, PER_BUCKET_FEATURES};
 
 use super::{L1_SIZE, L2_SIZE, INPUT_SIZE, QA, QB};
 use super::accumulator::{Accumulator, AccumulatorQ};
+use super::simd;
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +24,7 @@ pub struct NnueWeightsQ {
     pub ft_weights: Vec<[i16; L1_SIZE]>,
     pub ft_biases: [i16; L1_SIZE],
     pub l2_weights: Vec<[i8; L2_SIZE]>,
+    pub l2_weights_t: [[i8; 2 * L1_SIZE]; L2_SIZE],
     pub l2_biases: [i32; L2_SIZE],
     pub out_weights: [i16; L2_SIZE],
     pub out_bias: i32,
@@ -66,11 +68,19 @@ pub fn quantize_weights(w: &NnueWeights) -> NnueWeightsQ {
 
     let out_bias = (w.output_bias * qb_qb).round() as i32;
 
+    let mut l2_weights_t = [[0i8; 2 * L1_SIZE]; L2_SIZE];
+    for j in 0..L2_SIZE {
+        for i in 0..concat {
+            l2_weights_t[j][i] = l2_weights[i][j];
+        }
+    }
+
     NnueWeightsQ {
         version: w.version,
         ft_weights,
         ft_biases,
         l2_weights,
+        l2_weights_t,
         l2_biases,
         out_weights,
         out_bias,
@@ -264,39 +274,16 @@ pub fn evaluate(board: &Board, acc: &Accumulator) -> i32 {
 
 pub fn forward_q(acc: &AccumulatorQ, side: Color) -> i32 {
     let wq = weights_q();
-    let qa = QA;
-    let qa_qb = QA * QB;
 
     let (stm_acc, opp_acc) = match side {
         Color::White => (&acc.white, &acc.black),
         Color::Black => (&acc.black, &acc.white),
     };
 
-    let mut l2_out = wq.l2_biases;
+    let mut l2_out = [0i32; L2_SIZE];
+    simd::affine_l2(stm_acc, opp_acc, &wq.l2_weights_t, &wq.l2_biases, &mut l2_out);
 
-    for i in 0..L1_SIZE {
-        let clamped = stm_acc[i].max(0).min(qa as i16) as u8;
-        if clamped != 0 {
-            for j in 0..L2_SIZE {
-                l2_out[j] += clamped as i32 * wq.l2_weights[i][j] as i32;
-            }
-        }
-    }
-
-    for i in 0..L1_SIZE {
-        let clamped = opp_acc[i].max(0).min(qa as i16) as u8;
-        if clamped != 0 {
-            for j in 0..L2_SIZE {
-                l2_out[j] += clamped as i32 * wq.l2_weights[L1_SIZE + i][j] as i32;
-            }
-        }
-    }
-
-    let mut output = wq.out_bias as i64;
-    for j in 0..L2_SIZE {
-        let activated = l2_out[j].max(0).min(qa_qb) / qa;
-        output += activated as i64 * wq.out_weights[j] as i64;
-    }
+    let output = simd::output_layer(&l2_out, &wq.out_weights, wq.out_bias);
 
     (output * 400 / (QB as i64 * QB as i64)) as i32
 }

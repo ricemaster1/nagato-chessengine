@@ -9,6 +9,7 @@ use super::features::{
     feature_index_halfkp_black,
 };
 use super::network::{weights, weights_q};
+use super::simd;
 
 #[derive(Clone)]
 pub struct Accumulator {
@@ -141,10 +142,8 @@ pub fn refresh_accumulator_q(board: &Board, acc: &mut AccumulatorQ) {
                     let sq = pop_lsb(&mut bb);
                     let wi = feature_index_white(piece, color, sq);
                     let bi = feature_index_black(piece, color, sq);
-                    for j in 0..L1_SIZE {
-                        acc.white[j] += wq.ft_weights[wi][j];
-                        acc.black[j] += wq.ft_weights[bi][j];
-                    }
+                    simd::vec_add_i16(&mut acc.white, &wq.ft_weights[wi]);
+                    simd::vec_add_i16(&mut acc.black, &wq.ft_weights[bi]);
                 }
             }
         }
@@ -161,10 +160,8 @@ pub fn refresh_accumulator_q(board: &Board, acc: &mut AccumulatorQ) {
                     let sq = pop_lsb(&mut bb);
                     let wi = feature_index_halfkp_white(piece, color, sq, white_king);
                     let bi = feature_index_halfkp_black(piece, color, sq, black_king);
-                    for j in 0..L1_SIZE {
-                        acc.white[j] += wq.ft_weights[wi][j];
-                        acc.black[j] += wq.ft_weights[bi][j];
-                    }
+                    simd::vec_add_i16(&mut acc.white, &wq.ft_weights[wi]);
+                    simd::vec_add_i16(&mut acc.black, &wq.ft_weights[bi]);
                 }
             }
         }
@@ -177,12 +174,14 @@ pub fn accumulator_add_q(acc: &mut AccumulatorQ, piece: Piece, color: Color, sq:
     if wq.version == 1 {
         let wi = feature_index_white(piece, color, sq);
         let bi = feature_index_black(piece, color, sq);
-        for j in 0..L1_SIZE { acc.white[j] += wq.ft_weights[wi][j]; acc.black[j] += wq.ft_weights[bi][j]; }
+        simd::vec_add_i16(&mut acc.white, &wq.ft_weights[wi]);
+        simd::vec_add_i16(&mut acc.black, &wq.ft_weights[bi]);
     } else {
         if piece == Piece::King { return; }
         let wi = feature_index_halfkp_white(piece, color, sq, white_king);
         let bi = feature_index_halfkp_black(piece, color, sq, black_king);
-        for j in 0..L1_SIZE { acc.white[j] += wq.ft_weights[wi][j]; acc.black[j] += wq.ft_weights[bi][j]; }
+        simd::vec_add_i16(&mut acc.white, &wq.ft_weights[wi]);
+        simd::vec_add_i16(&mut acc.black, &wq.ft_weights[bi]);
     }
 }
 
@@ -192,12 +191,14 @@ pub fn accumulator_remove_q(acc: &mut AccumulatorQ, piece: Piece, color: Color, 
     if wq.version == 1 {
         let wi = feature_index_white(piece, color, sq);
         let bi = feature_index_black(piece, color, sq);
-        for j in 0..L1_SIZE { acc.white[j] -= wq.ft_weights[wi][j]; acc.black[j] -= wq.ft_weights[bi][j]; }
+        simd::vec_sub_i16(&mut acc.white, &wq.ft_weights[wi]);
+        simd::vec_sub_i16(&mut acc.black, &wq.ft_weights[bi]);
     } else {
         if piece == Piece::King { return; }
         let wi = feature_index_halfkp_white(piece, color, sq, white_king);
         let bi = feature_index_halfkp_black(piece, color, sq, black_king);
-        for j in 0..L1_SIZE { acc.white[j] -= wq.ft_weights[wi][j]; acc.black[j] -= wq.ft_weights[bi][j]; }
+        simd::vec_sub_i16(&mut acc.white, &wq.ft_weights[wi]);
+        simd::vec_sub_i16(&mut acc.black, &wq.ft_weights[bi]);
     }
 }
 
@@ -209,14 +210,16 @@ pub fn accumulator_move_q(acc: &mut AccumulatorQ, piece: Piece, color: Color, fr
         let wi_to   = feature_index_white(piece, color, to);
         let bi_from = feature_index_black(piece, color, from);
         let bi_to   = feature_index_black(piece, color, to);
-        for j in 0..L1_SIZE { acc.white[j] += wq.ft_weights[wi_to][j] - wq.ft_weights[wi_from][j]; acc.black[j] += wq.ft_weights[bi_to][j] - wq.ft_weights[bi_from][j]; }
+        simd::vec_add_sub_i16(&mut acc.white, &wq.ft_weights[wi_to], &wq.ft_weights[wi_from]);
+        simd::vec_add_sub_i16(&mut acc.black, &wq.ft_weights[bi_to], &wq.ft_weights[bi_from]);
     } else {
         if piece == Piece::King { return; }
         let wi_from = feature_index_halfkp_white(piece, color, from, white_king);
         let wi_to   = feature_index_halfkp_white(piece, color, to, white_king);
         let bi_from = feature_index_halfkp_black(piece, color, from, black_king);
         let bi_to   = feature_index_halfkp_black(piece, color, to, black_king);
-        for j in 0..L1_SIZE { acc.white[j] += wq.ft_weights[wi_to][j] - wq.ft_weights[wi_from][j]; acc.black[j] += wq.ft_weights[bi_to][j] - wq.ft_weights[bi_from][j]; }
+        simd::vec_add_sub_i16(&mut acc.white, &wq.ft_weights[wi_to], &wq.ft_weights[wi_from]);
+        simd::vec_add_sub_i16(&mut acc.black, &wq.ft_weights[bi_to], &wq.ft_weights[bi_from]);
     }
 }
 
