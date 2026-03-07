@@ -36,6 +36,8 @@ pub struct Board {
 
     pub accumulator: nnue::Accumulator,
     pub acc_history: Vec<nnue::Accumulator>,
+    pub accumulator_q: nnue::AccumulatorQ,
+    pub acc_history_q: Vec<nnue::AccumulatorQ>,
 }
 
 pub const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -55,6 +57,8 @@ impl Board {
             history: Vec::with_capacity(256),
             accumulator: nnue::Accumulator::new(),
             acc_history: Vec::with_capacity(256),
+            accumulator_q: nnue::AccumulatorQ::new(),
+            acc_history_q: Vec::with_capacity(256),
         }
     }
 
@@ -133,6 +137,9 @@ impl Board {
             let mut acc = nnue::Accumulator::new();
             nnue::refresh_accumulator(&board, &mut acc);
             board.accumulator = acc;
+            let mut acc_q = nnue::AccumulatorQ::new();
+            nnue::refresh_accumulator_q(&board, &mut acc_q);
+            board.accumulator_q = acc_q;
         }
 
         Ok(board)
@@ -288,6 +295,7 @@ impl Board {
 
         if nnue_active {
             self.acc_history.push(self.accumulator.clone());
+            self.acc_history_q.push(self.accumulator_q.clone());
         }
 
         let captured = if m.is_capture() && !m.is_en_passant() {
@@ -454,6 +462,51 @@ impl Board {
                 }
                 _ => {}
             }
+            let aq = &mut self.accumulator_q;
+            match m.flags() {
+                FLAG_QUIET | FLAG_DOUBLE_PAWN => {
+                    nnue::accumulator_move_q(aq, piece, us, from, to, white_king_sq, black_king_sq);
+                }
+                FLAG_KING_CASTLE => {
+                    nnue::accumulator_move_q(aq, Piece::King, us, from, to, white_king_sq, black_king_sq);
+                    let (rook_from, rook_to) = match us {
+                        Color::White => (sq::H1, sq::F1),
+                        Color::Black => (sq::H8, sq::F8),
+                    };
+                    nnue::accumulator_move_q(aq, Piece::Rook, us, rook_from, rook_to, white_king_sq, black_king_sq);
+                }
+                FLAG_QUEEN_CASTLE => {
+                    nnue::accumulator_move_q(aq, Piece::King, us, from, to, white_king_sq, black_king_sq);
+                    let (rook_from, rook_to) = match us {
+                        Color::White => (sq::A1, sq::D1),
+                        Color::Black => (sq::A8, sq::D8),
+                    };
+                    nnue::accumulator_move_q(aq, Piece::Rook, us, rook_from, rook_to, white_king_sq, black_king_sq);
+                }
+                FLAG_CAPTURE => {
+                    let cap = captured.unwrap();
+                    nnue::accumulator_remove_q(aq, cap, them, to, white_king_sq, black_king_sq);
+                    nnue::accumulator_move_q(aq, piece, us, from, to, white_king_sq, black_king_sq);
+                }
+                FLAG_EP_CAPTURE => {
+                    let cap_sq = match us {
+                        Color::White => to - 8,
+                        Color::Black => to + 8,
+                    };
+                    nnue::accumulator_remove_q(aq, Piece::Pawn, them, cap_sq, white_king_sq, black_king_sq);
+                    nnue::accumulator_move_q(aq, Piece::Pawn, us, from, to, white_king_sq, black_king_sq);
+                }
+                _ if m.is_promotion() => {
+                    let promo = m.promotion_piece().unwrap();
+                    nnue::accumulator_remove_q(aq, Piece::Pawn, us, from, white_king_sq, black_king_sq);
+                    if m.is_capture() {
+                        let cap = captured.unwrap();
+                        nnue::accumulator_remove_q(aq, cap, them, to, white_king_sq, black_king_sq);
+                    }
+                    nnue::accumulator_add_q(aq, promo, us, to, white_king_sq, black_king_sq);
+                }
+                _ => {}
+            }
         }
         self.castling &= Self::CASTLE_MASK[from as usize] & Self::CASTLE_MASK[to as usize];
         self.hash ^= keys.castle_keys[self.castling as usize];
@@ -475,6 +528,9 @@ impl Board {
         if nnue::is_active() {
             if let Some(prev_acc) = self.acc_history.pop() {
                 self.accumulator = prev_acc;
+            }
+            if let Some(prev_acc_q) = self.acc_history_q.pop() {
+                self.accumulator_q = prev_acc_q;
             }
         }
         self.side = self.side.flip();

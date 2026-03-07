@@ -130,9 +130,8 @@ fn compute_phase(board: &Board) -> i32 {
 /// Main evaluation function. Returns score in centipawns from the perspective
 /// of the side to move.
 pub fn evaluate(board: &Board) -> i32 {
-    // Use NNUE if available, otherwise fall back to HCE
     if nnue::is_active() {
-        return nnue::evaluate(board, &board.accumulator);
+        return nnue::evaluate_q(board, &board.accumulator_q);
     }
 
     evaluate_hce(board)

@@ -2,8 +2,8 @@ use crate::bitboard::Color;
 use crate::board::Board;
 use crate::nnue::features::{KING_BUCKETS, PER_BUCKET_FEATURES};
 
-use super::{L1_SIZE, L2_SIZE, INPUT_SIZE};
-use super::accumulator::Accumulator;
+use super::{L1_SIZE, L2_SIZE, INPUT_SIZE, QA, QB};
+use super::accumulator::{Accumulator, AccumulatorQ};
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +18,67 @@ pub struct NnueWeights {
     pub output_bias: f32,
 }
 
+pub struct NnueWeightsQ {
+    pub version: u32,
+    pub ft_weights: Vec<[i16; L1_SIZE]>,
+    pub ft_biases: [i16; L1_SIZE],
+    pub l2_weights: Vec<[i8; L2_SIZE]>,
+    pub l2_biases: [i32; L2_SIZE],
+    pub out_weights: [i16; L2_SIZE],
+    pub out_bias: i32,
+}
+
+pub fn quantize_weights(w: &NnueWeights) -> NnueWeightsQ {
+    let qa = QA as f32;
+    let qb = QB as f32;
+    let qa_qb = qa * qb;
+    let qb_qb = qb * qb;
+
+    let mut ft_weights = vec![[0i16; L1_SIZE]; w.l1_weights.len()];
+    for i in 0..w.l1_weights.len() {
+        for j in 0..L1_SIZE {
+            ft_weights[i][j] = (w.l1_weights[i][j] * qa).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        }
+    }
+
+    let mut ft_biases = [0i16; L1_SIZE];
+    for j in 0..L1_SIZE {
+        ft_biases[j] = (w.l1_biases[j] * qa).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    }
+
+    let concat = 2 * L1_SIZE;
+    let mut l2_weights = vec![[0i8; L2_SIZE]; concat];
+    for i in 0..concat {
+        for j in 0..L2_SIZE {
+            l2_weights[i][j] = (w.l2_weights[i][j] * qb).round().clamp(i8::MIN as f32, i8::MAX as f32) as i8;
+        }
+    }
+
+    let mut l2_biases = [0i32; L2_SIZE];
+    for j in 0..L2_SIZE {
+        l2_biases[j] = (w.l2_biases[j] * qa_qb).round() as i32;
+    }
+
+    let mut out_weights = [0i16; L2_SIZE];
+    for j in 0..L2_SIZE {
+        out_weights[j] = (w.output_weights[j] * qb).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    }
+
+    let out_bias = (w.output_bias * qb_qb).round() as i32;
+
+    NnueWeightsQ {
+        version: w.version,
+        ft_weights,
+        ft_biases,
+        l2_weights,
+        l2_biases,
+        out_weights,
+        out_bias,
+    }
+}
+
 static NNUE_STATE: OnceLock<NnueWeights> = OnceLock::new();
+static NNUE_STATE_Q: OnceLock<NnueWeightsQ> = OnceLock::new();
 static NNUE_LOADED: AtomicBool = AtomicBool::new(false);
 
 pub fn init() {
@@ -26,7 +86,9 @@ pub fn init() {
     if path.exists() {
         match load_weights_from_file(path) {
             Ok(w) => {
+                let q = quantize_weights(&w);
                 let _ = NNUE_STATE.set(w);
+                let _ = NNUE_STATE_Q.set(q);
                 NNUE_LOADED.store(true, Ordering::Relaxed);
                 eprintln!("info string NNUE loaded from nn.bin");
             }
@@ -47,6 +109,11 @@ pub fn is_active() -> bool {
 #[inline]
 pub(super) fn weights() -> &'static NnueWeights {
     NNUE_STATE.get().unwrap()
+}
+
+#[inline]
+pub(super) fn weights_q() -> &'static NnueWeightsQ {
+    NNUE_STATE_Q.get().unwrap()
 }
 
 pub fn load_weights_from_file(path: &std::path::Path) -> Result<NnueWeights, String> {
@@ -195,6 +262,49 @@ pub fn evaluate(board: &Board, acc: &Accumulator) -> i32 {
     forward(acc, board.side)
 }
 
+pub fn forward_q(acc: &AccumulatorQ, side: Color) -> i32 {
+    let wq = weights_q();
+    let qa = QA;
+    let qa_qb = QA * QB;
+
+    let (stm_acc, opp_acc) = match side {
+        Color::White => (&acc.white, &acc.black),
+        Color::Black => (&acc.black, &acc.white),
+    };
+
+    let mut l2_out = wq.l2_biases;
+
+    for i in 0..L1_SIZE {
+        let clamped = stm_acc[i].max(0).min(qa as i16) as u8;
+        if clamped != 0 {
+            for j in 0..L2_SIZE {
+                l2_out[j] += clamped as i32 * wq.l2_weights[i][j] as i32;
+            }
+        }
+    }
+
+    for i in 0..L1_SIZE {
+        let clamped = opp_acc[i].max(0).min(qa as i16) as u8;
+        if clamped != 0 {
+            for j in 0..L2_SIZE {
+                l2_out[j] += clamped as i32 * wq.l2_weights[L1_SIZE + i][j] as i32;
+            }
+        }
+    }
+
+    let mut output = wq.out_bias as i64;
+    for j in 0..L2_SIZE {
+        let activated = l2_out[j].max(0).min(qa_qb) / qa;
+        output += activated as i64 * wq.out_weights[j] as i64;
+    }
+
+    (output * 400 / (QB as i64 * QB as i64)) as i32
+}
+
+pub fn evaluate_q(board: &Board, acc: &AccumulatorQ) -> i32 {
+    forward_q(acc, board.side)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +406,114 @@ mod tests {
     }
 
     #[test]
+    fn test_quantize_weights_ft() {
+        let w = make_synthetic_weights(1);
+        let q = quantize_weights(&w);
+        assert_eq!(q.version, 1);
+        let expected_ft = (0.01f32 * QA as f32).round() as i16;
+        assert_eq!(q.ft_weights[0][0], expected_ft);
+        assert_eq!(q.ft_biases[0], 0);
+    }
+
+    #[test]
+    fn test_quantize_weights_l2() {
+        let w = make_synthetic_weights(1);
+        let q = quantize_weights(&w);
+        let expected_l2 = (0.01f32 * QB as f32).round() as i8;
+        assert_eq!(q.l2_weights[0][0], expected_l2);
+        let expected_l2_bias = (0.0f32 * (QA as f32 * QB as f32)).round() as i32;
+        assert_eq!(q.l2_biases[0], expected_l2_bias);
+    }
+
+    #[test]
+    fn test_quantize_weights_output() {
+        let w = make_synthetic_weights(1);
+        let q = quantize_weights(&w);
+        let expected_out_w = (0.01f32 * QB as f32).round() as i16;
+        assert_eq!(q.out_weights[0], expected_out_w);
+        assert_eq!(q.out_bias, 0);
+    }
+
+    #[test]
+    fn test_forward_q_vs_forward() {
+        let w = make_synthetic_weights(1);
+        let q = quantize_weights(&w);
+        let _ = NNUE_STATE.set(w);
+        let _ = NNUE_STATE_Q.set(q);
+        NNUE_LOADED.store(true, Ordering::Relaxed);
+
+        let mut acc_f = Accumulator::new();
+        acc_f.white = [0.5; L1_SIZE];
+        acc_f.black = [0.3; L1_SIZE];
+
+        let mut acc_q = AccumulatorQ::new();
+        for j in 0..L1_SIZE {
+            acc_q.white[j] = (0.5 * QA as f32).round() as i16;
+            acc_q.black[j] = (0.3 * QA as f32).round() as i16;
+        }
+
+        let f32_result = forward(&acc_f, Color::White);
+        let q_result = forward_q(&acc_q, Color::White);
+
+        let diff = (f32_result - q_result).abs();
+        assert!(diff <= 100, "f32={} q={} diff={} (uniform 0.01 weights have high quant error)", f32_result, q_result, diff);
+
+        NNUE_LOADED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_forward_q_zero_acc() {
+        let w = make_synthetic_weights(1);
+        let q = quantize_weights(&w);
+        let _ = NNUE_STATE.set(w);
+        let _ = NNUE_STATE_Q.set(q);
+        NNUE_LOADED.store(true, Ordering::Relaxed);
+
+        let acc_q = AccumulatorQ::new();
+        let result = forward_q(&acc_q, Color::White);
+        assert_eq!(result, 0);
+
+        NNUE_LOADED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_forward_q_exact_arithmetic() {
+        let concat = 2 * L1_SIZE;
+        let w = NnueWeights {
+            version: 1,
+            l1_weights: vec![[0.0f32; L1_SIZE]; INPUT_SIZE],
+            l1_biases: [0.0f32; L1_SIZE],
+            l2_weights: vec![[1.0 / QB as f32; L2_SIZE]; concat],
+            l2_biases: [0.0f32; L2_SIZE],
+            output_weights: [1.0 / QB as f32; L2_SIZE],
+            output_bias: 0.0,
+        };
+        let q = quantize_weights(&w);
+
+        assert_eq!(q.l2_weights[0][0], 1i8);
+        assert_eq!(q.out_weights[0], 1i16);
+
+        let _ = NNUE_STATE.set(w);
+        let _ = NNUE_STATE_Q.set(q);
+        NNUE_LOADED.store(true, Ordering::Relaxed);
+
+        let mut acc_q = AccumulatorQ::new();
+        for j in 0..L1_SIZE {
+            acc_q.white[j] = 20;
+            acc_q.black[j] = 10;
+        }
+
+        let result = forward_q(&acc_q, Color::White);
+        let l2_dot = 128 * 20 * 1 + 128 * 10 * 1;
+        let l2_crelu = std::cmp::min(l2_dot, QA * QB) / QA;
+        let output_dot = L2_SIZE as i64 * l2_crelu as i64 * 1i64;
+        let expected = (output_dot * 400 / (QB as i64 * QB as i64)) as i32;
+        assert_eq!(result, expected, "result={} expected={}", result, expected);
+
+        NNUE_LOADED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
     #[ignore]
     fn bench_forward_pass() {
         use std::time::Instant;
@@ -344,5 +562,33 @@ mod tests {
         let ns_per = elapsed.as_nanos() as f64 / iterations as f64;
         println!("refresh_accumulator: {} iterations in {:.2?} ({:.0} ns/iter, {:.1}K refreshes/s)",
             iterations, elapsed, ns_per, 1e9 / ns_per / 1e3);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_forward_q_pass() {
+        use std::time::Instant;
+        let w = make_synthetic_weights(1);
+        let q = quantize_weights(&w);
+        let _ = NNUE_STATE.set(w);
+        let _ = NNUE_STATE_Q.set(q);
+        NNUE_LOADED.store(true, Ordering::Relaxed);
+
+        let mut acc_q = AccumulatorQ::new();
+        for j in 0..L1_SIZE {
+            acc_q.white[j] = (0.5 * QA as f32).round() as i16;
+            acc_q.black[j] = (0.3 * QA as f32).round() as i16;
+        }
+
+        let iterations = 1_000_000;
+        let start = Instant::now();
+        let mut sum = 0i64;
+        for _ in 0..iterations {
+            sum += forward_q(&acc_q, Color::White) as i64;
+        }
+        let elapsed = start.elapsed();
+        let ns_per = elapsed.as_nanos() as f64 / iterations as f64;
+        println!("forward_q: {} iterations in {:.2?} ({:.0} ns/iter, {:.1} M evals/s) [sum={}]",
+            iterations, elapsed, ns_per, 1e9 / ns_per / 1e6, sum);
     }
 }
