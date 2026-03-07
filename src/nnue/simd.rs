@@ -136,6 +136,207 @@ pub fn output_layer(
     output
 }
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+const CHUNK_AVX2: usize = 16;
+const ITERS_AVX2: usize = L1_SIZE / CHUNK_AVX2;
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn vec_add_i16_avx2(dst: &mut [i16; L1_SIZE], src: &[i16; L1_SIZE]) {
+    for k in 0..ITERS_AVX2 {
+        let off = k * CHUNK_AVX2;
+        let a = _mm256_loadu_si256(dst.as_ptr().add(off) as *const __m256i);
+        let b = _mm256_loadu_si256(src.as_ptr().add(off) as *const __m256i);
+        _mm256_storeu_si256(dst.as_mut_ptr().add(off) as *mut __m256i, _mm256_add_epi16(a, b));
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn vec_sub_i16_avx2(dst: &mut [i16; L1_SIZE], src: &[i16; L1_SIZE]) {
+    for k in 0..ITERS_AVX2 {
+        let off = k * CHUNK_AVX2;
+        let a = _mm256_loadu_si256(dst.as_ptr().add(off) as *const __m256i);
+        let b = _mm256_loadu_si256(src.as_ptr().add(off) as *const __m256i);
+        _mm256_storeu_si256(dst.as_mut_ptr().add(off) as *mut __m256i, _mm256_sub_epi16(a, b));
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn vec_add_sub_i16_avx2(
+    dst: &mut [i16; L1_SIZE],
+    add_src: &[i16; L1_SIZE],
+    sub_src: &[i16; L1_SIZE],
+) {
+    for k in 0..ITERS_AVX2 {
+        let off = k * CHUNK_AVX2;
+        let d = _mm256_loadu_si256(dst.as_ptr().add(off) as *const __m256i);
+        let a = _mm256_loadu_si256(add_src.as_ptr().add(off) as *const __m256i);
+        let s = _mm256_loadu_si256(sub_src.as_ptr().add(off) as *const __m256i);
+        let r = _mm256_sub_epi16(_mm256_add_epi16(d, a), s);
+        _mm256_storeu_si256(dst.as_mut_ptr().add(off) as *mut __m256i, r);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn crelu_pack_avx2(
+    stm: &[i16; L1_SIZE],
+    opp: &[i16; L1_SIZE],
+    out: &mut [u8; CONCAT],
+    qa: i16,
+) {
+    let zero = _mm256_setzero_si256();
+    let max = _mm256_set1_epi16(qa);
+    for k in 0..ITERS_AVX2 {
+        let off = k * CHUNK_AVX2;
+        let v = _mm256_loadu_si256(stm.as_ptr().add(off) as *const __m256i);
+        let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max);
+        let packed = _mm256_packus_epi16(clamped, _mm256_setzero_si256());
+        let packed = _mm256_permute4x64_epi64(packed, 0b11_01_10_00);
+        let lo = _mm256_castsi256_si128(packed);
+        _mm_storeu_si128(out.as_mut_ptr().add(off) as *mut __m128i, lo);
+    }
+    for k in 0..ITERS_AVX2 {
+        let off = k * CHUNK_AVX2;
+        let v = _mm256_loadu_si256(opp.as_ptr().add(off) as *const __m256i);
+        let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max);
+        let packed = _mm256_packus_epi16(clamped, _mm256_setzero_si256());
+        let packed = _mm256_permute4x64_epi64(packed, 0b11_01_10_00);
+        let lo = _mm256_castsi256_si128(packed);
+        _mm_storeu_si128(out.as_mut_ptr().add(L1_SIZE + off) as *mut __m128i, lo);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn dot_u8_i8_avx2(acts: &[u8; CONCAT], weights_t: &[i8], bias: i32) -> i32 {
+    let mut acc = _mm256_setzero_si256();
+    let ones = _mm256_set1_epi16(1);
+    let mut k = 0usize;
+    while k < CONCAT {
+        let a = _mm256_loadu_si256(acts.as_ptr().add(k) as *const __m256i);
+        let w = _mm256_loadu_si256(weights_t.as_ptr().add(k) as *const __m256i);
+        let prod = _mm256_maddubs_epi16(a, w);
+        let widened = _mm256_madd_epi16(prod, ones);
+        acc = _mm256_add_epi32(acc, widened);
+        k += 32;
+    }
+    let hi = _mm256_extracti128_si256(acc, 1);
+    let lo = _mm256_castsi256_si128(acc);
+    let sum128 = _mm_add_epi32(lo, hi);
+    let hi64 = _mm_unpackhi_epi64(sum128, sum128);
+    let sum64 = _mm_add_epi32(sum128, hi64);
+    let hi32 = _mm_shuffle_epi32(sum64, 0b00_00_00_01);
+    let sum32 = _mm_add_epi32(sum64, hi32);
+    bias + _mm_cvtsi128_si32(sum32)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn vec_add_i16(dst: &mut [i16; L1_SIZE], src: &[i16; L1_SIZE]) {
+    if is_x86_feature_detected!("avx2") {
+        unsafe { vec_add_i16_avx2(dst, src) }
+    } else {
+        for j in 0..L1_SIZE { dst[j] += src[j]; }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn vec_sub_i16(dst: &mut [i16; L1_SIZE], src: &[i16; L1_SIZE]) {
+    if is_x86_feature_detected!("avx2") {
+        unsafe { vec_sub_i16_avx2(dst, src) }
+    } else {
+        for j in 0..L1_SIZE { dst[j] -= src[j]; }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn vec_add_sub_i16(
+    dst: &mut [i16; L1_SIZE],
+    add_src: &[i16; L1_SIZE],
+    sub_src: &[i16; L1_SIZE],
+) {
+    if is_x86_feature_detected!("avx2") {
+        unsafe { vec_add_sub_i16_avx2(dst, add_src, sub_src) }
+    } else {
+        for j in 0..L1_SIZE {
+            dst[j] = dst[j].wrapping_add(add_src[j]).wrapping_sub(sub_src[j]);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn crelu_pack(
+    stm: &[i16; L1_SIZE],
+    opp: &[i16; L1_SIZE],
+    out: &mut [u8; CONCAT],
+    qa: i16,
+) {
+    if is_x86_feature_detected!("avx2") {
+        unsafe { crelu_pack_avx2(stm, opp, out, qa) }
+    } else {
+        for i in 0..L1_SIZE { out[i] = stm[i].max(0).min(qa) as u8; }
+        for i in 0..L1_SIZE { out[L1_SIZE + i] = opp[i].max(0).min(qa) as u8; }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn dot_u8_i8(acts: &[u8; CONCAT], weights_t: &[i8], bias: i32) -> i32 {
+    if is_x86_feature_detected!("avx2") {
+        unsafe { dot_u8_i8_avx2(acts, weights_t, bias) }
+    } else {
+        let mut sum = bias;
+        for i in 0..CONCAT { sum += acts[i] as i32 * weights_t[i] as i32; }
+        sum
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn affine_l2(
+    stm: &[i16; L1_SIZE],
+    opp: &[i16; L1_SIZE],
+    weights_t: &[[i8; CONCAT]; L2_SIZE],
+    biases: &[i32; L2_SIZE],
+    out: &mut [i32; L2_SIZE],
+) {
+    let mut acts = [0u8; CONCAT];
+    crelu_pack(stm, opp, &mut acts, QA as i16);
+    for j in 0..L2_SIZE {
+        out[j] = dot_u8_i8(&acts, &weights_t[j], biases[j]);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn output_layer(
+    l2_out: &[i32; L2_SIZE],
+    out_weights: &[i16; L2_SIZE],
+    out_bias: i32,
+) -> i64 {
+    let qa = QA;
+    let qa_qb = QA * QB;
+    let mut output = out_bias as i64;
+    for j in 0..L2_SIZE {
+        let activated = l2_out[j].max(0).min(qa_qb) / qa;
+        output += activated as i64 * out_weights[j] as i64;
+    }
+    output
+}
+
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[inline]
 pub fn vec_add_i16(dst: &mut [i16; L1_SIZE], src: &[i16; L1_SIZE]) {
