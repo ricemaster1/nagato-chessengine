@@ -3,7 +3,9 @@ pub mod accumulator;
 pub mod network;
 pub mod simd;
 
-pub const L1_SIZE: usize = 128;
+pub const L1_SIZE: usize = 256;
+pub const L1_PAIR: usize = L1_SIZE / 2;
+pub const L2_INPUT: usize = 2 * L1_PAIR;
 pub const L2_SIZE: usize = 32;
 pub const INPUT_SIZE: usize = 768;
 

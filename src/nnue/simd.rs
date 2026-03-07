@@ -1,8 +1,9 @@
-use super::{L1_SIZE, L2_SIZE, QA, QB};
+use super::{L1_SIZE, L1_PAIR, L2_INPUT, L2_SIZE, QA, QB};
 
 const CHUNK_NEON: usize = 8;
 const ITERS_NEON: usize = L1_SIZE / CHUNK_NEON;
-const CONCAT: usize = 2 * L1_SIZE;
+const CONCAT: usize = L2_INPUT;
+const ITERS_PAIR_NEON: usize = L1_PAIR / CHUNK_NEON;
 
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
@@ -54,28 +55,33 @@ pub fn vec_add_sub_i16(
 
 #[cfg(target_arch = "aarch64")]
 #[inline]
-pub fn crelu_pack(
+pub fn pairwise_crelu(
     stm: &[i16; L1_SIZE],
     opp: &[i16; L1_SIZE],
     out: &mut [u8; CONCAT],
-    qa: i16,
 ) {
     unsafe {
         let zero = vdupq_n_s16(0);
-        let max = vdupq_n_s16(qa);
-        for k in 0..ITERS_NEON {
+        let max = vdupq_n_s16(QA as i16);
+        for k in 0..ITERS_PAIR_NEON {
             let off = k * CHUNK_NEON;
-            let v = vld1q_s16(stm.as_ptr().add(off));
-            let clamped = vminq_s16(vmaxq_s16(v, zero), max);
-            let narrow = vmovn_u16(vreinterpretq_u16_s16(clamped));
-            vst1_u8(out.as_mut_ptr().add(off), narrow);
+            let lo = vminq_s16(vmaxq_s16(vld1q_s16(stm.as_ptr().add(off)), zero), max);
+            let hi = vminq_s16(vmaxq_s16(vld1q_s16(stm.as_ptr().add(L1_PAIR + off)), zero), max);
+            let lo_u8 = vmovn_u16(vreinterpretq_u16_s16(lo));
+            let hi_u8 = vmovn_u16(vreinterpretq_u16_s16(hi));
+            let prod = vmull_u8(lo_u8, hi_u8);
+            let scaled = vmovn_u16(vshrq_n_u16::<8>(prod));
+            vst1_u8(out.as_mut_ptr().add(off), scaled);
         }
-        for k in 0..ITERS_NEON {
+        for k in 0..ITERS_PAIR_NEON {
             let off = k * CHUNK_NEON;
-            let v = vld1q_s16(opp.as_ptr().add(off));
-            let clamped = vminq_s16(vmaxq_s16(v, zero), max);
-            let narrow = vmovn_u16(vreinterpretq_u16_s16(clamped));
-            vst1_u8(out.as_mut_ptr().add(L1_SIZE + off), narrow);
+            let lo = vminq_s16(vmaxq_s16(vld1q_s16(opp.as_ptr().add(off)), zero), max);
+            let hi = vminq_s16(vmaxq_s16(vld1q_s16(opp.as_ptr().add(L1_PAIR + off)), zero), max);
+            let lo_u8 = vmovn_u16(vreinterpretq_u16_s16(lo));
+            let hi_u8 = vmovn_u16(vreinterpretq_u16_s16(hi));
+            let prod = vmull_u8(lo_u8, hi_u8);
+            let scaled = vmovn_u16(vshrq_n_u16::<8>(prod));
+            vst1_u8(out.as_mut_ptr().add(L1_PAIR + off), scaled);
         }
     }
 }
@@ -113,7 +119,7 @@ pub fn affine_l2(
     out: &mut [i32; L2_SIZE],
 ) {
     let mut acts = [0u8; CONCAT];
-    crelu_pack(stm, opp, &mut acts, QA as i16);
+    pairwise_crelu(stm, opp, &mut acts);
     for j in 0..L2_SIZE {
         out[j] = dot_u8_i8(&acts, &weights_t[j], biases[j]);
     }
@@ -141,6 +147,7 @@ use std::arch::x86_64::*;
 
 const CHUNK_AVX2: usize = 16;
 const ITERS_AVX2: usize = L1_SIZE / CHUNK_AVX2;
+const ITERS_PAIR_AVX2: usize = L1_PAIR / CHUNK_AVX2;
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
@@ -187,31 +194,38 @@ unsafe fn vec_add_sub_i16_avx2(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn crelu_pack_avx2(
+unsafe fn pairwise_crelu_avx2(
     stm: &[i16; L1_SIZE],
     opp: &[i16; L1_SIZE],
     out: &mut [u8; CONCAT],
-    qa: i16,
 ) {
     let zero = _mm256_setzero_si256();
-    let max = _mm256_set1_epi16(qa);
-    for k in 0..ITERS_AVX2 {
+    let max = _mm256_set1_epi16(QA as i16);
+    for k in 0..ITERS_PAIR_AVX2 {
         let off = k * CHUNK_AVX2;
-        let v = _mm256_loadu_si256(stm.as_ptr().add(off) as *const __m256i);
-        let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max);
-        let packed = _mm256_packus_epi16(clamped, _mm256_setzero_si256());
+        let lo = _mm256_min_epi16(_mm256_max_epi16(
+            _mm256_loadu_si256(stm.as_ptr().add(off) as *const __m256i), zero), max);
+        let hi = _mm256_min_epi16(_mm256_max_epi16(
+            _mm256_loadu_si256(stm.as_ptr().add(L1_PAIR + off) as *const __m256i), zero), max);
+        let prod = _mm256_mullo_epi16(lo, hi);
+        let shifted = _mm256_srli_epi16(prod, 8);
+        let packed = _mm256_packus_epi16(shifted, _mm256_setzero_si256());
         let packed = _mm256_permute4x64_epi64(packed, 0b11_01_10_00);
-        let lo = _mm256_castsi256_si128(packed);
-        _mm_storeu_si128(out.as_mut_ptr().add(off) as *mut __m128i, lo);
+        let lo128 = _mm256_castsi256_si128(packed);
+        _mm_storeu_si128(out.as_mut_ptr().add(off) as *mut __m128i, lo128);
     }
-    for k in 0..ITERS_AVX2 {
+    for k in 0..ITERS_PAIR_AVX2 {
         let off = k * CHUNK_AVX2;
-        let v = _mm256_loadu_si256(opp.as_ptr().add(off) as *const __m256i);
-        let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max);
-        let packed = _mm256_packus_epi16(clamped, _mm256_setzero_si256());
+        let lo = _mm256_min_epi16(_mm256_max_epi16(
+            _mm256_loadu_si256(opp.as_ptr().add(off) as *const __m256i), zero), max);
+        let hi = _mm256_min_epi16(_mm256_max_epi16(
+            _mm256_loadu_si256(opp.as_ptr().add(L1_PAIR + off) as *const __m256i), zero), max);
+        let prod = _mm256_mullo_epi16(lo, hi);
+        let shifted = _mm256_srli_epi16(prod, 8);
+        let packed = _mm256_packus_epi16(shifted, _mm256_setzero_si256());
         let packed = _mm256_permute4x64_epi64(packed, 0b11_01_10_00);
-        let lo = _mm256_castsi256_si128(packed);
-        _mm_storeu_si128(out.as_mut_ptr().add(L1_SIZE + off) as *mut __m128i, lo);
+        let lo128 = _mm256_castsi256_si128(packed);
+        _mm_storeu_si128(out.as_mut_ptr().add(L1_PAIR + off) as *mut __m128i, lo128);
     }
 }
 
@@ -278,17 +292,24 @@ pub fn vec_add_sub_i16(
 
 #[cfg(target_arch = "x86_64")]
 #[inline]
-pub fn crelu_pack(
+pub fn pairwise_crelu(
     stm: &[i16; L1_SIZE],
     opp: &[i16; L1_SIZE],
     out: &mut [u8; CONCAT],
-    qa: i16,
 ) {
     if is_x86_feature_detected!("avx2") {
-        unsafe { crelu_pack_avx2(stm, opp, out, qa) }
+        unsafe { pairwise_crelu_avx2(stm, opp, out) }
     } else {
-        for i in 0..L1_SIZE { out[i] = stm[i].max(0).min(qa) as u8; }
-        for i in 0..L1_SIZE { out[L1_SIZE + i] = opp[i].max(0).min(qa) as u8; }
+        for i in 0..L1_PAIR {
+            let lo = stm[i].max(0).min(QA as i16) as u16;
+            let hi = stm[L1_PAIR + i].max(0).min(QA as i16) as u16;
+            out[i] = ((lo * hi) >> 8) as u8;
+        }
+        for i in 0..L1_PAIR {
+            let lo = opp[i].max(0).min(QA as i16) as u16;
+            let hi = opp[L1_PAIR + i].max(0).min(QA as i16) as u16;
+            out[L1_PAIR + i] = ((lo * hi) >> 8) as u8;
+        }
     }
 }
 
@@ -314,7 +335,7 @@ pub fn affine_l2(
     out: &mut [i32; L2_SIZE],
 ) {
     let mut acts = [0u8; CONCAT];
-    crelu_pack(stm, opp, &mut acts, QA as i16);
+    pairwise_crelu(stm, opp, &mut acts);
     for j in 0..L2_SIZE {
         out[j] = dot_u8_i8(&acts, &weights_t[j], biases[j]);
     }
@@ -367,17 +388,20 @@ pub fn vec_add_sub_i16(
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[inline]
-pub fn crelu_pack(
+pub fn pairwise_crelu(
     stm: &[i16; L1_SIZE],
     opp: &[i16; L1_SIZE],
     out: &mut [u8; CONCAT],
-    qa: i16,
 ) {
-    for i in 0..L1_SIZE {
-        out[i] = stm[i].max(0).min(qa) as u8;
+    for i in 0..L1_PAIR {
+        let lo = stm[i].max(0).min(QA as i16) as u16;
+        let hi = stm[L1_PAIR + i].max(0).min(QA as i16) as u16;
+        out[i] = ((lo * hi) >> 8) as u8;
     }
-    for i in 0..L1_SIZE {
-        out[L1_SIZE + i] = opp[i].max(0).min(qa) as u8;
+    for i in 0..L1_PAIR {
+        let lo = opp[i].max(0).min(QA as i16) as u16;
+        let hi = opp[L1_PAIR + i].max(0).min(QA as i16) as u16;
+        out[L1_PAIR + i] = ((lo * hi) >> 8) as u8;
     }
 }
 
@@ -401,7 +425,7 @@ pub fn affine_l2(
     out: &mut [i32; L2_SIZE],
 ) {
     let mut acts = [0u8; CONCAT];
-    crelu_pack(stm, opp, &mut acts, QA as i16);
+    pairwise_crelu(stm, opp, &mut acts);
     for j in 0..L2_SIZE {
         out[j] = dot_u8_i8(&acts, &weights_t[j], biases[j]);
     }
@@ -486,32 +510,36 @@ mod tests {
     }
 
     #[test]
-    fn test_crelu_pack_basic() {
+    fn test_pairwise_crelu_basic() {
         let mut stm = [0i16; L1_SIZE];
         let mut opp = [0i16; L1_SIZE];
-        for i in 0..L1_SIZE {
-            stm[i] = i as i16 * 3;
-            opp[i] = -(i as i16);
+        for i in 0..L1_PAIR {
+            stm[i] = 100;
+            stm[L1_PAIR + i] = 200;
+            opp[i] = 50;
+            opp[L1_PAIR + i] = 50;
         }
         let mut out = [0u8; CONCAT];
-        crelu_pack(&stm, &opp, &mut out, QA as i16);
-        for i in 0..L1_SIZE {
-            let expected = (stm[i].max(0).min(QA as i16)) as u8;
-            assert_eq!(out[i], expected, "stm mismatch at {}", i);
+        pairwise_crelu(&stm, &opp, &mut out);
+        let expected_stm = ((100u16 * 200) >> 8) as u8;
+        let expected_opp = ((50u16 * 50) >> 8) as u8;
+        for i in 0..L1_PAIR {
+            assert_eq!(out[i], expected_stm, "stm mismatch at {}", i);
         }
-        for i in 0..L1_SIZE {
-            assert_eq!(out[L1_SIZE + i], 0, "negative should clamp to 0");
+        for i in 0..L1_PAIR {
+            assert_eq!(out[L1_PAIR + i], expected_opp, "opp mismatch at {}", i);
         }
     }
 
     #[test]
-    fn test_crelu_pack_saturation() {
-        let stm = [500i16; L1_SIZE];
-        let opp = [200i16; L1_SIZE];
+    fn test_pairwise_crelu_saturation() {
+        let stm = [255i16; L1_SIZE];
+        let opp = [0i16; L1_SIZE];
         let mut out = [0u8; CONCAT];
-        crelu_pack(&stm, &opp, &mut out, QA as i16);
-        assert!(out[..L1_SIZE].iter().all(|&v| v == QA as u8));
-        assert!(out[L1_SIZE..].iter().all(|&v| v == 200));
+        pairwise_crelu(&stm, &opp, &mut out);
+        let max_val = ((255u16 * 255) >> 8) as u8;
+        assert!(out[..L1_PAIR].iter().all(|&v| v == max_val));
+        assert!(out[L1_PAIR..].iter().all(|&v| v == 0));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::bitboard::Color;
 use crate::board::Board;
 use crate::nnue::features::{KING_BUCKETS, PER_BUCKET_FEATURES};
 
-use super::{L1_SIZE, L2_SIZE, INPUT_SIZE, QA, QB};
+use super::{L1_SIZE, L1_PAIR, L2_INPUT, L2_SIZE, INPUT_SIZE, QA, QB};
 use super::accumulator::{Accumulator, AccumulatorQ};
 use super::simd;
 
@@ -24,7 +24,7 @@ pub struct NnueWeightsQ {
     pub ft_weights: Vec<[i16; L1_SIZE]>,
     pub ft_biases: [i16; L1_SIZE],
     pub l2_weights: Vec<[i8; L2_SIZE]>,
-    pub l2_weights_t: [[i8; 2 * L1_SIZE]; L2_SIZE],
+    pub l2_weights_t: [[i8; L2_INPUT]; L2_SIZE],
     pub l2_biases: [i32; L2_SIZE],
     pub out_weights: [i16; L2_SIZE],
     pub out_bias: i32,
@@ -48,7 +48,7 @@ pub fn quantize_weights(w: &NnueWeights) -> NnueWeightsQ {
         ft_biases[j] = (w.l1_biases[j] * qa).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
     }
 
-    let concat = 2 * L1_SIZE;
+    let concat = L2_INPUT;
     let mut l2_weights = vec![[0i8; L2_SIZE]; concat];
     for i in 0..concat {
         for j in 0..L2_SIZE {
@@ -68,7 +68,7 @@ pub fn quantize_weights(w: &NnueWeights) -> NnueWeightsQ {
 
     let out_bias = (w.output_bias * qb_qb).round() as i32;
 
-    let mut l2_weights_t = [[0i8; 2 * L1_SIZE]; L2_SIZE];
+    let mut l2_weights_t = [[0i8; L2_INPUT]; L2_SIZE];
     for j in 0..L2_SIZE {
         for i in 0..concat {
             l2_weights_t[j][i] = l2_weights[i][j];
@@ -185,7 +185,7 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
         l1_biases[j] = read_f32(&mut cursor, data)?;
     }
 
-    let concat_size = 2 * L1_SIZE;
+    let concat_size = L2_INPUT;
     let mut l2_weights = vec![[0.0f32; L2_SIZE]; concat_size];
     for i in 0..concat_size {
         for j in 0..L2_SIZE {
@@ -242,8 +242,10 @@ pub fn forward(acc: &Accumulator, side: Color) -> i32 {
 
     let mut l2_out = w.l2_biases;
 
-    for i in 0..L1_SIZE {
-        let activated = clipped_relu(stm_acc[i]);
+    for i in 0..L1_PAIR {
+        let lo = clipped_relu(stm_acc[i]);
+        let hi = clipped_relu(stm_acc[L1_PAIR + i]);
+        let activated = lo * hi;
         if activated != 0.0 {
             for j in 0..L2_SIZE {
                 l2_out[j] += activated * w.l2_weights[i][j];
@@ -251,11 +253,13 @@ pub fn forward(acc: &Accumulator, side: Color) -> i32 {
         }
     }
 
-    for i in 0..L1_SIZE {
-        let activated = clipped_relu(opp_acc[i]);
+    for i in 0..L1_PAIR {
+        let lo = clipped_relu(opp_acc[i]);
+        let hi = clipped_relu(opp_acc[L1_PAIR + i]);
+        let activated = lo * hi;
         if activated != 0.0 {
             for j in 0..L2_SIZE {
-                l2_out[j] += activated * w.l2_weights[L1_SIZE + i][j];
+                l2_out[j] += activated * w.l2_weights[L1_PAIR + i][j];
             }
         }
     }
@@ -307,22 +311,20 @@ mod tests {
 
     #[test]
     fn test_weight_file_size() {
-        let concat_size = 2 * L1_SIZE;
         let expected_floats = INPUT_SIZE * L1_SIZE
             + L1_SIZE
-            + concat_size * L2_SIZE
+            + L2_INPUT * L2_SIZE
             + L2_SIZE
             + L2_SIZE
             + 1;
         let expected_bytes = 8 + expected_floats * 4;
-        assert_eq!(expected_bytes, 426_764);
+        assert_eq!(expected_bytes, 820_492);
     }
 
     #[test]
     fn test_load_v1_roundtrip() {
         let l1_rows = INPUT_SIZE;
-        let concat = 2 * L1_SIZE;
-        let total_floats = l1_rows * L1_SIZE + L1_SIZE + concat * L2_SIZE + L2_SIZE + L2_SIZE + 1;
+        let total_floats = l1_rows * L1_SIZE + L1_SIZE + L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1;
         let mut buf: Vec<u8> = Vec::with_capacity(8 + total_floats * 4);
         buf.extend_from_slice(b"NAGT");
         buf.extend_from_slice(&1u32.to_le_bytes());
@@ -332,7 +334,7 @@ mod tests {
         let w = load_weights_from_bytes(&buf).expect("v1 load failed");
         assert_eq!(w.version, 1);
         assert_eq!(w.l1_weights.len(), l1_rows);
-        assert_eq!(w.l2_weights.len(), concat);
+        assert_eq!(w.l2_weights.len(), L2_INPUT);
         let first_l1 = w.l1_weights[0][0];
         assert!((first_l1 - 0.0).abs() < 1e-6);
     }
@@ -340,8 +342,7 @@ mod tests {
     #[test]
     fn test_load_v2_roundtrip() {
         let l1_rows = KING_BUCKETS * PER_BUCKET_FEATURES;
-        let concat = 2 * L1_SIZE;
-        let total_floats = l1_rows * L1_SIZE + L1_SIZE + concat * L2_SIZE + L2_SIZE + L2_SIZE + 1;
+        let total_floats = l1_rows * L1_SIZE + L1_SIZE + L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1;
         let mut buf: Vec<u8> = Vec::with_capacity(8 + total_floats * 4);
         buf.extend_from_slice(b"NAGT");
         buf.extend_from_slice(&2u32.to_le_bytes());
@@ -351,7 +352,7 @@ mod tests {
         let w = load_weights_from_bytes(&buf).expect("v2 load failed");
         assert_eq!(w.version, 2);
         assert_eq!(w.l1_weights.len(), l1_rows);
-        assert_eq!(w.l2_weights.len(), concat);
+        assert_eq!(w.l2_weights.len(), L2_INPUT);
     }
 
     #[test]
@@ -380,12 +381,11 @@ mod tests {
 
     fn make_synthetic_weights(version: u32) -> NnueWeights {
         let l1_rows = if version == 1 { INPUT_SIZE } else { KING_BUCKETS * PER_BUCKET_FEATURES };
-        let concat = 2 * L1_SIZE;
         NnueWeights {
             version,
             l1_weights: vec![[0.01f32; L1_SIZE]; l1_rows],
             l1_biases: [0.0f32; L1_SIZE],
-            l2_weights: vec![[0.01f32; L2_SIZE]; concat],
+            l2_weights: vec![[0.01f32; L2_SIZE]; L2_INPUT],
             l2_biases: [0.0f32; L2_SIZE],
             output_weights: [0.01f32; L2_SIZE],
             output_bias: 0.0,
@@ -465,12 +465,11 @@ mod tests {
 
     #[test]
     fn test_forward_q_exact_arithmetic() {
-        let concat = 2 * L1_SIZE;
         let w = NnueWeights {
             version: 1,
             l1_weights: vec![[0.0f32; L1_SIZE]; INPUT_SIZE],
             l1_biases: [0.0f32; L1_SIZE],
-            l2_weights: vec![[1.0 / QB as f32; L2_SIZE]; concat],
+            l2_weights: vec![[1.0 / QB as f32; L2_SIZE]; L2_INPUT],
             l2_biases: [0.0f32; L2_SIZE],
             output_weights: [1.0 / QB as f32; L2_SIZE],
             output_bias: 0.0,
@@ -486,12 +485,14 @@ mod tests {
 
         let mut acc_q = AccumulatorQ::new();
         for j in 0..L1_SIZE {
-            acc_q.white[j] = 20;
-            acc_q.black[j] = 10;
+            acc_q.white[j] = 200;
+            acc_q.black[j] = 100;
         }
 
         let result = forward_q(&acc_q, Color::White);
-        let l2_dot = 128 * 20 * 1 + 128 * 10 * 1;
+        let stm_pw: i32 = (200u16 as u32 * 200u16 as u32 >> 8) as i32;
+        let opp_pw: i32 = (100u16 as u32 * 100u16 as u32 >> 8) as i32;
+        let l2_dot = L1_PAIR as i32 * stm_pw * 1 + L1_PAIR as i32 * opp_pw * 1;
         let l2_crelu = std::cmp::min(l2_dot, QA * QB) / QA;
         let output_dot = L2_SIZE as i64 * l2_crelu as i64 * 1i64;
         let expected = (output_dot * 400 / (QB as i64 * QB as i64)) as i32;
