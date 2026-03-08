@@ -8,9 +8,24 @@ use super::features::{
     feature_index_black,
     feature_index_halfkp_white,
     feature_index_halfkp_black,
+    king_bucket_of,
 };
 use super::network::{weights, weights_q};
 use super::simd;
+
+pub const SQ_NONE: u8 = 64;
+
+#[derive(Clone, Copy)]
+pub struct DirtyPiece {
+    pub piece: Piece,
+    pub color: Color,
+    pub from: u8,
+    pub to: u8,
+}
+
+impl DirtyPiece {
+    pub const EMPTY: Self = DirtyPiece { piece: Piece::Pawn, color: Color::White, from: SQ_NONE, to: SQ_NONE };
+}
 
 #[derive(Clone)]
 pub struct Accumulator {

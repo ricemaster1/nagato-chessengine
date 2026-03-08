@@ -37,6 +37,10 @@ pub struct Board {
 
     pub accumulator_q: nnue::AccumulatorQ,
     pub acc_stack_q: nnue::AccStackQ,
+    pub acc_computed: bool,
+    pub acc_needs_refresh: bool,
+    pub acc_dirty: [nnue::DirtyPiece; 3],
+    pub acc_dirty_num: u8,
 }
 
 pub const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -56,6 +60,10 @@ impl Board {
             history: Vec::with_capacity(256),
             accumulator_q: nnue::AccumulatorQ::new(),
             acc_stack_q: nnue::AccStackQ::new(),
+            acc_computed: true,
+            acc_needs_refresh: false,
+            acc_dirty: [nnue::DirtyPiece::EMPTY; 3],
+            acc_dirty_num: 0,
         }
     }
 
@@ -134,6 +142,7 @@ impl Board {
             let mut acc_q = nnue::AccumulatorQ::new();
             nnue::refresh_accumulator_q(&board, &mut acc_q);
             board.accumulator_q = acc_q;
+            board.acc_computed = true;
         }
 
         Ok(board)
@@ -277,6 +286,31 @@ impl Board {
         h
     }
 
+    pub fn ensure_acc_computed(&mut self) {
+        if self.acc_computed { return; }
+        if self.acc_needs_refresh {
+            let mut acc = std::mem::replace(&mut self.accumulator_q, nnue::AccumulatorQ::new());
+            nnue::refresh_accumulator_q(self, &mut acc);
+            self.accumulator_q = acc;
+        } else {
+            let wk = self.king_sq(Color::White);
+            let bk = self.king_sq(Color::Black);
+            for i in 0..self.acc_dirty_num as usize {
+                let dp = self.acc_dirty[i];
+                if dp.from != nnue::SQ_NONE && dp.to != nnue::SQ_NONE {
+                    nnue::accumulator_move_q(&mut self.accumulator_q, dp.piece, dp.color, dp.from, dp.to, wk, bk);
+                } else if dp.from != nnue::SQ_NONE {
+                    nnue::accumulator_remove_q(&mut self.accumulator_q, dp.piece, dp.color, dp.from, wk, bk);
+                } else if dp.to != nnue::SQ_NONE {
+                    nnue::accumulator_add_q(&mut self.accumulator_q, dp.piece, dp.color, dp.to, wk, bk);
+                }
+            }
+        }
+        self.acc_computed = true;
+        self.acc_needs_refresh = false;
+        self.acc_dirty_num = 0;
+    }
+
     const CASTLE_MASK: [u8; 64] = {
         let mut mask = [ALL_CASTLES; 64];
         mask[sq::A1 as usize] &= !WQ_CASTLE;
@@ -293,6 +327,7 @@ impl Board {
         let nnue_active = nnue::is_active();
 
         if nnue_active {
+            self.ensure_acc_computed();
             self.acc_stack_q.push(&self.accumulator_q);
         }
 
@@ -414,53 +449,72 @@ impl Board {
             _ => unreachable!("Unknown move flag: {:04b}", m.flags()),
         }
         if nnue_active {
-            let white_king_sq = self.king_sq(Color::White);
-            let black_king_sq = self.king_sq(Color::Black);
-            let aq = &mut self.accumulator_q;
+            self.acc_dirty_num = 0;
+            self.acc_needs_refresh = false;
+            let king_moved = piece == Piece::King;
             match m.flags() {
                 FLAG_QUIET | FLAG_DOUBLE_PAWN => {
-                    nnue::accumulator_move_q(aq, piece, us, from, to, white_king_sq, black_king_sq);
+                    if king_moved {
+                        self.acc_needs_refresh = true;
+                    } else {
+                        self.acc_dirty[0] = nnue::DirtyPiece { piece, color: us, from, to };
+                        self.acc_dirty_num = 1;
+                    }
                 }
                 FLAG_KING_CASTLE => {
-                    nnue::accumulator_move_q(aq, Piece::King, us, from, to, white_king_sq, black_king_sq);
+                    self.acc_needs_refresh = true;
                     let (rook_from, rook_to) = match us {
                         Color::White => (sq::H1, sq::F1),
                         Color::Black => (sq::H8, sq::F8),
                     };
-                    nnue::accumulator_move_q(aq, Piece::Rook, us, rook_from, rook_to, white_king_sq, black_king_sq);
+                    self.acc_dirty[0] = nnue::DirtyPiece { piece: Piece::Rook, color: us, from: rook_from, to: rook_to };
+                    self.acc_dirty_num = 1;
                 }
                 FLAG_QUEEN_CASTLE => {
-                    nnue::accumulator_move_q(aq, Piece::King, us, from, to, white_king_sq, black_king_sq);
+                    self.acc_needs_refresh = true;
                     let (rook_from, rook_to) = match us {
                         Color::White => (sq::A1, sq::D1),
                         Color::Black => (sq::A8, sq::D8),
                     };
-                    nnue::accumulator_move_q(aq, Piece::Rook, us, rook_from, rook_to, white_king_sq, black_king_sq);
+                    self.acc_dirty[0] = nnue::DirtyPiece { piece: Piece::Rook, color: us, from: rook_from, to: rook_to };
+                    self.acc_dirty_num = 1;
                 }
                 FLAG_CAPTURE => {
                     let cap = captured.unwrap();
-                    nnue::accumulator_remove_q(aq, cap, them, to, white_king_sq, black_king_sq);
-                    nnue::accumulator_move_q(aq, piece, us, from, to, white_king_sq, black_king_sq);
+                    if king_moved {
+                        self.acc_needs_refresh = true;
+                        self.acc_dirty[0] = nnue::DirtyPiece { piece: cap, color: them, from: to, to: nnue::SQ_NONE };
+                        self.acc_dirty_num = 1;
+                    } else {
+                        self.acc_dirty[0] = nnue::DirtyPiece { piece: cap, color: them, from: to, to: nnue::SQ_NONE };
+                        self.acc_dirty[1] = nnue::DirtyPiece { piece, color: us, from, to };
+                        self.acc_dirty_num = 2;
+                    }
                 }
                 FLAG_EP_CAPTURE => {
                     let cap_sq = match us {
                         Color::White => to - 8,
                         Color::Black => to + 8,
                     };
-                    nnue::accumulator_remove_q(aq, Piece::Pawn, them, cap_sq, white_king_sq, black_king_sq);
-                    nnue::accumulator_move_q(aq, Piece::Pawn, us, from, to, white_king_sq, black_king_sq);
+                    self.acc_dirty[0] = nnue::DirtyPiece { piece: Piece::Pawn, color: them, from: cap_sq, to: nnue::SQ_NONE };
+                    self.acc_dirty[1] = nnue::DirtyPiece { piece: Piece::Pawn, color: us, from, to };
+                    self.acc_dirty_num = 2;
                 }
                 _ if m.is_promotion() => {
                     let promo = m.promotion_piece().unwrap();
-                    nnue::accumulator_remove_q(aq, Piece::Pawn, us, from, white_king_sq, black_king_sq);
+                    self.acc_dirty[0] = nnue::DirtyPiece { piece: Piece::Pawn, color: us, from, to: nnue::SQ_NONE };
+                    let mut n = 1u8;
                     if m.is_capture() {
                         let cap = captured.unwrap();
-                        nnue::accumulator_remove_q(aq, cap, them, to, white_king_sq, black_king_sq);
+                        self.acc_dirty[1] = nnue::DirtyPiece { piece: cap, color: them, from: to, to: nnue::SQ_NONE };
+                        n = 2;
                     }
-                    nnue::accumulator_add_q(aq, promo, us, to, white_king_sq, black_king_sq);
+                    self.acc_dirty[n as usize] = nnue::DirtyPiece { piece: promo, color: us, from: nnue::SQ_NONE, to };
+                    self.acc_dirty_num = n + 1;
                 }
                 _ => {}
             }
+            self.acc_computed = false;
         }
         self.castling &= Self::CASTLE_MASK[from as usize] & Self::CASTLE_MASK[to as usize];
         self.hash ^= keys.castle_keys[self.castling as usize];
@@ -485,6 +539,9 @@ impl Board {
             self.accumulator_q.black = prev.black;
             self.accumulator_q.psqt_white = prev.psqt_white;
             self.accumulator_q.psqt_black = prev.psqt_black;
+            self.acc_computed = true;
+            self.acc_needs_refresh = false;
+            self.acc_dirty_num = 0;
         }
         self.side = self.side.flip();
         let us = self.side;

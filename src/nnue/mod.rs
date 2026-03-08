@@ -19,6 +19,8 @@ pub use accumulator::{
     Accumulator,
     AccumulatorQ,
     AccStackQ,
+    DirtyPiece,
+    SQ_NONE,
     refresh_accumulator,
     refresh_accumulator_q,
     accumulator_add,
