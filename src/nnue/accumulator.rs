@@ -50,6 +50,53 @@ impl AccumulatorQ {
     }
 }
 
+const MAX_PLY: usize = 128;
+
+pub struct AccStackQ {
+    entries: Box<[AccumulatorQ; MAX_PLY]>,
+    sp: usize,
+}
+
+impl Clone for AccStackQ {
+    fn clone(&self) -> Self {
+        AccStackQ {
+            entries: self.entries.clone(),
+            sp: self.sp,
+        }
+    }
+}
+
+impl AccStackQ {
+    pub fn new() -> Self {
+        AccStackQ {
+            entries: Box::new(std::array::from_fn(|_| AccumulatorQ::new())),
+            sp: 0,
+        }
+    }
+
+    #[inline]
+    pub fn push(&mut self, acc: &AccumulatorQ) {
+        debug_assert!(self.sp < MAX_PLY);
+        self.entries[self.sp].white = acc.white;
+        self.entries[self.sp].black = acc.black;
+        self.entries[self.sp].psqt_white = acc.psqt_white;
+        self.entries[self.sp].psqt_black = acc.psqt_black;
+        self.sp += 1;
+    }
+
+    #[inline]
+    pub fn pop(&mut self) -> &AccumulatorQ {
+        debug_assert!(self.sp > 0);
+        self.sp -= 1;
+        &self.entries[self.sp]
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.sp = 0;
+    }
+}
+
 pub fn refresh_accumulator(board: &Board, acc: &mut Accumulator) {
     let w = weights();
     acc.white = w.l1_biases;

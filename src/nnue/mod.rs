@@ -18,6 +18,7 @@ pub const QB: i32 = 64;
 pub use accumulator::{
     Accumulator,
     AccumulatorQ,
+    AccStackQ,
     refresh_accumulator,
     refresh_accumulator_q,
     accumulator_add,

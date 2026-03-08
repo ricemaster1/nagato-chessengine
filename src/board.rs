@@ -16,6 +16,7 @@ pub struct UndoInfo {
     pub halfmove: u16,
     pub hash: u64,
     pub captured_piece: Option<Piece>,
+    pub nnue_pushed: bool,
 }
 
 #[derive(Clone)]
@@ -34,10 +35,8 @@ pub struct Board {
 
     pub history: Vec<UndoInfo>,
 
-    pub accumulator: nnue::Accumulator,
-    pub acc_history: Vec<nnue::Accumulator>,
     pub accumulator_q: nnue::AccumulatorQ,
-    pub acc_history_q: Vec<nnue::AccumulatorQ>,
+    pub acc_stack_q: nnue::AccStackQ,
 }
 
 pub const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -55,10 +54,8 @@ impl Board {
             fullmove: 1,
             hash: 0,
             history: Vec::with_capacity(256),
-            accumulator: nnue::Accumulator::new(),
-            acc_history: Vec::with_capacity(256),
             accumulator_q: nnue::AccumulatorQ::new(),
-            acc_history_q: Vec::with_capacity(256),
+            acc_stack_q: nnue::AccStackQ::new(),
         }
     }
 
@@ -134,9 +131,6 @@ impl Board {
         board.hash = board.compute_hash();
 
         if nnue::is_active() {
-            let mut acc = nnue::Accumulator::new();
-            nnue::refresh_accumulator(&board, &mut acc);
-            board.accumulator = acc;
             let mut acc_q = nnue::AccumulatorQ::new();
             nnue::refresh_accumulator_q(&board, &mut acc_q);
             board.accumulator_q = acc_q;
@@ -299,8 +293,7 @@ impl Board {
         let nnue_active = nnue::is_active();
 
         if nnue_active {
-            self.acc_history.push(self.accumulator.clone());
-            self.acc_history_q.push(self.accumulator_q.clone());
+            self.acc_stack_q.push(&self.accumulator_q);
         }
 
         let captured = if m.is_capture() && !m.is_en_passant() {
@@ -315,6 +308,7 @@ impl Board {
             halfmove: self.halfmove,
             hash: self.hash,
             captured_piece: captured,
+            nnue_pushed: nnue_active,
         };
         self.history.push(undo);
 
@@ -422,51 +416,6 @@ impl Board {
         if nnue_active {
             let white_king_sq = self.king_sq(Color::White);
             let black_king_sq = self.king_sq(Color::Black);
-            let acc = &mut self.accumulator;
-            match m.flags() {
-                FLAG_QUIET | FLAG_DOUBLE_PAWN => {
-                    nnue::accumulator_move(acc, piece, us, from, to, white_king_sq, black_king_sq);
-                }
-                FLAG_KING_CASTLE => {
-                    nnue::accumulator_move(acc, Piece::King, us, from, to, white_king_sq, black_king_sq);
-                    let (rook_from, rook_to) = match us {
-                        Color::White => (sq::H1, sq::F1),
-                        Color::Black => (sq::H8, sq::F8),
-                    };
-                    nnue::accumulator_move(acc, Piece::Rook, us, rook_from, rook_to, white_king_sq, black_king_sq);
-                }
-                FLAG_QUEEN_CASTLE => {
-                    nnue::accumulator_move(acc, Piece::King, us, from, to, white_king_sq, black_king_sq);
-                    let (rook_from, rook_to) = match us {
-                        Color::White => (sq::A1, sq::D1),
-                        Color::Black => (sq::A8, sq::D8),
-                    };
-                    nnue::accumulator_move(acc, Piece::Rook, us, rook_from, rook_to, white_king_sq, black_king_sq);
-                }
-                FLAG_CAPTURE => {
-                    let cap = captured.unwrap();
-                    nnue::accumulator_remove(acc, cap, them, to, white_king_sq, black_king_sq);
-                    nnue::accumulator_move(acc, piece, us, from, to, white_king_sq, black_king_sq);
-                }
-                FLAG_EP_CAPTURE => {
-                    let cap_sq = match us {
-                        Color::White => to - 8,
-                        Color::Black => to + 8,
-                    };
-                    nnue::accumulator_remove(acc, Piece::Pawn, them, cap_sq, white_king_sq, black_king_sq);
-                    nnue::accumulator_move(acc, Piece::Pawn, us, from, to, white_king_sq, black_king_sq);
-                }
-                _ if m.is_promotion() => {
-                    let promo = m.promotion_piece().unwrap();
-                    nnue::accumulator_remove(acc, Piece::Pawn, us, from, white_king_sq, black_king_sq);
-                    if m.is_capture() {
-                        let cap = captured.unwrap();
-                        nnue::accumulator_remove(acc, cap, them, to, white_king_sq, black_king_sq);
-                    }
-                    nnue::accumulator_add(acc, promo, us, to, white_king_sq, black_king_sq);
-                }
-                _ => {}
-            }
             let aq = &mut self.accumulator_q;
             match m.flags() {
                 FLAG_QUIET | FLAG_DOUBLE_PAWN => {
@@ -530,13 +479,12 @@ impl Board {
     }
     pub fn unmake_move(&mut self, m: Move) {
         let undo = self.history.pop().expect("No undo info on stack");
-        if nnue::is_active() {
-            if let Some(prev_acc) = self.acc_history.pop() {
-                self.accumulator = prev_acc;
-            }
-            if let Some(prev_acc_q) = self.acc_history_q.pop() {
-                self.accumulator_q = prev_acc_q;
-            }
+        if undo.nnue_pushed {
+            let prev = self.acc_stack_q.pop();
+            self.accumulator_q.white = prev.white;
+            self.accumulator_q.black = prev.black;
+            self.accumulator_q.psqt_white = prev.psqt_white;
+            self.accumulator_q.psqt_black = prev.psqt_black;
         }
         self.side = self.side.flip();
         let us = self.side;
@@ -609,6 +557,7 @@ impl Board {
             halfmove: self.halfmove,
             hash: self.hash,
             captured_piece: None,
+            nnue_pushed: false,
         };
         self.history.push(undo);
 
