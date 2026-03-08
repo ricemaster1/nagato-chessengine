@@ -4,6 +4,7 @@ use crate::board::Board;
 use super::L1_SIZE;
 use super::NUM_PSQT_BUCKETS;
 use super::features::{
+    KING_BUCKETS,
     feature_index_white,
     feature_index_black,
     feature_index_halfkp_white,
@@ -109,6 +110,141 @@ impl AccStackQ {
     #[inline]
     pub fn clear(&mut self) {
         self.sp = 0;
+    }
+}
+
+#[derive(Clone)]
+pub struct FinnyEntry {
+    pub half: [i16; L1_SIZE],
+    pub psqt: [i32; NUM_PSQT_BUCKETS],
+    pub pieces: [[Bitboard; PIECE_COUNT]; COLOR_COUNT],
+    pub valid: bool,
+}
+
+impl FinnyEntry {
+    pub fn new() -> Self {
+        FinnyEntry {
+            half: [0; L1_SIZE],
+            psqt: [0; NUM_PSQT_BUCKETS],
+            pieces: [[0; PIECE_COUNT]; COLOR_COUNT],
+            valid: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct FinnyCache {
+    pub white: Box<[FinnyEntry; KING_BUCKETS]>,
+    pub black: Box<[FinnyEntry; KING_BUCKETS]>,
+}
+
+impl FinnyCache {
+    pub fn new() -> Self {
+        FinnyCache {
+            white: Box::new(std::array::from_fn(|_| FinnyEntry::new())),
+            black: Box::new(std::array::from_fn(|_| FinnyEntry::new())),
+        }
+    }
+}
+
+pub fn refresh_half_q(
+    pieces: &[[Bitboard; PIECE_COUNT]; COLOR_COUNT],
+    king_sq: u8,
+    half: &mut [i16; L1_SIZE],
+    psqt: &mut [i32; NUM_PSQT_BUCKETS],
+    perspective: Color,
+) {
+    let wq = weights_q();
+    *half = wq.ft_biases;
+    *psqt = [0; NUM_PSQT_BUCKETS];
+    for color_idx in 0..COLOR_COUNT {
+        let color = if color_idx == 0 { Color::White } else { Color::Black };
+        for piece_idx in 0..PIECE_COUNT {
+            let piece: Piece = unsafe { std::mem::transmute(piece_idx as u8) };
+            if piece == Piece::King { continue; }
+            let mut bb = pieces[color_idx][piece_idx];
+            while bb != 0 {
+                let sq = pop_lsb(&mut bb);
+                let fi = match perspective {
+                    Color::White => feature_index_halfkp_white(piece, color, sq, king_sq),
+                    Color::Black => feature_index_halfkp_black(piece, color, sq, king_sq),
+                };
+                simd::vec_add_i16(half, &wq.ft_weights[fi]);
+                for b in 0..NUM_PSQT_BUCKETS { psqt[b] += wq.psqt_weights[fi][b]; }
+            }
+        }
+    }
+}
+
+pub fn finny_update_half(
+    half: &mut [i16; L1_SIZE],
+    psqt: &mut [i32; NUM_PSQT_BUCKETS],
+    cached_pieces: &[[Bitboard; PIECE_COUNT]; COLOR_COUNT],
+    current_pieces: &[[Bitboard; PIECE_COUNT]; COLOR_COUNT],
+    king_sq: u8,
+    perspective: Color,
+) {
+    let wq = weights_q();
+    for color_idx in 0..COLOR_COUNT {
+        let color = if color_idx == 0 { Color::White } else { Color::Black };
+        for piece_idx in 0..PIECE_COUNT {
+            let piece: Piece = unsafe { std::mem::transmute(piece_idx as u8) };
+            if piece == Piece::King { continue; }
+            let old = cached_pieces[color_idx][piece_idx];
+            let new = current_pieces[color_idx][piece_idx];
+            if old == new { continue; }
+            let mut added = new & !old;
+            let mut removed = old & !new;
+            while added != 0 {
+                let sq = pop_lsb(&mut added);
+                let fi = match perspective {
+                    Color::White => feature_index_halfkp_white(piece, color, sq, king_sq),
+                    Color::Black => feature_index_halfkp_black(piece, color, sq, king_sq),
+                };
+                simd::vec_add_i16(half, &wq.ft_weights[fi]);
+                for b in 0..NUM_PSQT_BUCKETS { psqt[b] += wq.psqt_weights[fi][b]; }
+            }
+            while removed != 0 {
+                let sq = pop_lsb(&mut removed);
+                let fi = match perspective {
+                    Color::White => feature_index_halfkp_white(piece, color, sq, king_sq),
+                    Color::Black => feature_index_halfkp_black(piece, color, sq, king_sq),
+                };
+                simd::vec_sub_i16(half, &wq.ft_weights[fi]);
+                for b in 0..NUM_PSQT_BUCKETS { psqt[b] -= wq.psqt_weights[fi][b]; }
+            }
+        }
+    }
+}
+
+pub fn apply_dirty_half_q(
+    half: &mut [i16; L1_SIZE],
+    psqt: &mut [i32; NUM_PSQT_BUCKETS],
+    dirty: &[DirtyPiece; 3],
+    count: u8,
+    king_sq: u8,
+    perspective: Color,
+) {
+    let wq = weights_q();
+    for i in 0..count as usize {
+        let dp = dirty[i];
+        if dp.piece == Piece::King { continue; }
+        if dp.from != SQ_NONE {
+            let fi = match perspective {
+                Color::White => feature_index_halfkp_white(dp.piece, dp.color, dp.from, king_sq),
+                Color::Black => feature_index_halfkp_black(dp.piece, dp.color, dp.from, king_sq),
+            };
+            simd::vec_sub_i16(half, &wq.ft_weights[fi]);
+            for b in 0..NUM_PSQT_BUCKETS { psqt[b] -= wq.psqt_weights[fi][b]; }
+        }
+        if dp.to != SQ_NONE {
+            let fi = match perspective {
+                Color::White => feature_index_halfkp_white(dp.piece, dp.color, dp.to, king_sq),
+                Color::Black => feature_index_halfkp_black(dp.piece, dp.color, dp.to, king_sq),
+            };
+            simd::vec_add_i16(half, &wq.ft_weights[fi]);
+            for b in 0..NUM_PSQT_BUCKETS { psqt[b] += wq.psqt_weights[fi][b]; }
+        }
     }
 }
 

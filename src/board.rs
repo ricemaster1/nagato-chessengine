@@ -38,9 +38,11 @@ pub struct Board {
     pub accumulator_q: nnue::AccumulatorQ,
     pub acc_stack_q: nnue::AccStackQ,
     pub acc_computed: bool,
-    pub acc_needs_refresh: bool,
+    pub acc_refresh_white: bool,
+    pub acc_refresh_black: bool,
     pub acc_dirty: [nnue::DirtyPiece; 3],
     pub acc_dirty_num: u8,
+    pub finny_cache: nnue::FinnyCache,
 }
 
 pub const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -61,9 +63,11 @@ impl Board {
             accumulator_q: nnue::AccumulatorQ::new(),
             acc_stack_q: nnue::AccStackQ::new(),
             acc_computed: true,
-            acc_needs_refresh: false,
+            acc_refresh_white: false,
+            acc_refresh_black: false,
             acc_dirty: [nnue::DirtyPiece::EMPTY; 3],
             acc_dirty_num: 0,
+            finny_cache: nnue::FinnyCache::new(),
         }
     }
 
@@ -288,13 +292,65 @@ impl Board {
 
     pub fn ensure_acc_computed(&mut self) {
         if self.acc_computed { return; }
-        if self.acc_needs_refresh {
-            let mut acc = std::mem::replace(&mut self.accumulator_q, nnue::AccumulatorQ::new());
-            nnue::refresh_accumulator_q(self, &mut acc);
-            self.accumulator_q = acc;
+        let wk = self.king_sq(Color::White);
+        let bk = self.king_sq(Color::Black);
+        let needs_refresh = self.acc_refresh_white || self.acc_refresh_black;
+        if needs_refresh {
+            if self.acc_refresh_white {
+                let bucket = nnue::king_bucket_of(wk);
+                if self.finny_cache.white[bucket].valid {
+                    self.accumulator_q.white = self.finny_cache.white[bucket].half;
+                    self.accumulator_q.psqt_white = self.finny_cache.white[bucket].psqt;
+                    let cached_pieces = self.finny_cache.white[bucket].pieces;
+                    nnue::finny_update_half(
+                        &mut self.accumulator_q.white, &mut self.accumulator_q.psqt_white,
+                        &cached_pieces, &self.pieces, wk, Color::White,
+                    );
+                } else {
+                    nnue::refresh_half_q(
+                        &self.pieces, wk,
+                        &mut self.accumulator_q.white, &mut self.accumulator_q.psqt_white,
+                        Color::White,
+                    );
+                }
+                self.finny_cache.white[bucket].half = self.accumulator_q.white;
+                self.finny_cache.white[bucket].psqt = self.accumulator_q.psqt_white;
+                self.finny_cache.white[bucket].pieces = self.pieces;
+                self.finny_cache.white[bucket].valid = true;
+            } else {
+                nnue::apply_dirty_half_q(
+                    &mut self.accumulator_q.white, &mut self.accumulator_q.psqt_white,
+                    &self.acc_dirty, self.acc_dirty_num, wk, Color::White,
+                );
+            }
+            if self.acc_refresh_black {
+                let bucket = nnue::king_bucket_of(bk ^ 56);
+                if self.finny_cache.black[bucket].valid {
+                    self.accumulator_q.black = self.finny_cache.black[bucket].half;
+                    self.accumulator_q.psqt_black = self.finny_cache.black[bucket].psqt;
+                    let cached_pieces = self.finny_cache.black[bucket].pieces;
+                    nnue::finny_update_half(
+                        &mut self.accumulator_q.black, &mut self.accumulator_q.psqt_black,
+                        &cached_pieces, &self.pieces, bk, Color::Black,
+                    );
+                } else {
+                    nnue::refresh_half_q(
+                        &self.pieces, bk,
+                        &mut self.accumulator_q.black, &mut self.accumulator_q.psqt_black,
+                        Color::Black,
+                    );
+                }
+                self.finny_cache.black[bucket].half = self.accumulator_q.black;
+                self.finny_cache.black[bucket].psqt = self.accumulator_q.psqt_black;
+                self.finny_cache.black[bucket].pieces = self.pieces;
+                self.finny_cache.black[bucket].valid = true;
+            } else {
+                nnue::apply_dirty_half_q(
+                    &mut self.accumulator_q.black, &mut self.accumulator_q.psqt_black,
+                    &self.acc_dirty, self.acc_dirty_num, bk, Color::Black,
+                );
+            }
         } else {
-            let wk = self.king_sq(Color::White);
-            let bk = self.king_sq(Color::Black);
             for i in 0..self.acc_dirty_num as usize {
                 let dp = self.acc_dirty[i];
                 if dp.from != nnue::SQ_NONE && dp.to != nnue::SQ_NONE {
@@ -307,7 +363,8 @@ impl Board {
             }
         }
         self.acc_computed = true;
-        self.acc_needs_refresh = false;
+        self.acc_refresh_white = false;
+        self.acc_refresh_black = false;
         self.acc_dirty_num = 0;
     }
 
@@ -450,46 +507,36 @@ impl Board {
         }
         if nnue_active {
             self.acc_dirty_num = 0;
-            self.acc_needs_refresh = false;
-            let king_moved = piece == Piece::King;
+            self.acc_refresh_white = false;
+            self.acc_refresh_black = false;
             match m.flags() {
                 FLAG_QUIET | FLAG_DOUBLE_PAWN => {
-                    if king_moved {
-                        self.acc_needs_refresh = true;
-                    } else {
-                        self.acc_dirty[0] = nnue::DirtyPiece { piece, color: us, from, to };
-                        self.acc_dirty_num = 1;
-                    }
+                    self.acc_dirty[0] = nnue::DirtyPiece { piece, color: us, from, to };
+                    self.acc_dirty_num = 1;
                 }
                 FLAG_KING_CASTLE => {
-                    self.acc_needs_refresh = true;
                     let (rook_from, rook_to) = match us {
                         Color::White => (sq::H1, sq::F1),
                         Color::Black => (sq::H8, sq::F8),
                     };
-                    self.acc_dirty[0] = nnue::DirtyPiece { piece: Piece::Rook, color: us, from: rook_from, to: rook_to };
-                    self.acc_dirty_num = 1;
+                    self.acc_dirty[0] = nnue::DirtyPiece { piece: Piece::King, color: us, from, to };
+                    self.acc_dirty[1] = nnue::DirtyPiece { piece: Piece::Rook, color: us, from: rook_from, to: rook_to };
+                    self.acc_dirty_num = 2;
                 }
                 FLAG_QUEEN_CASTLE => {
-                    self.acc_needs_refresh = true;
                     let (rook_from, rook_to) = match us {
                         Color::White => (sq::A1, sq::D1),
                         Color::Black => (sq::A8, sq::D8),
                     };
-                    self.acc_dirty[0] = nnue::DirtyPiece { piece: Piece::Rook, color: us, from: rook_from, to: rook_to };
-                    self.acc_dirty_num = 1;
+                    self.acc_dirty[0] = nnue::DirtyPiece { piece: Piece::King, color: us, from, to };
+                    self.acc_dirty[1] = nnue::DirtyPiece { piece: Piece::Rook, color: us, from: rook_from, to: rook_to };
+                    self.acc_dirty_num = 2;
                 }
                 FLAG_CAPTURE => {
                     let cap = captured.unwrap();
-                    if king_moved {
-                        self.acc_needs_refresh = true;
-                        self.acc_dirty[0] = nnue::DirtyPiece { piece: cap, color: them, from: to, to: nnue::SQ_NONE };
-                        self.acc_dirty_num = 1;
-                    } else {
-                        self.acc_dirty[0] = nnue::DirtyPiece { piece: cap, color: them, from: to, to: nnue::SQ_NONE };
-                        self.acc_dirty[1] = nnue::DirtyPiece { piece, color: us, from, to };
-                        self.acc_dirty_num = 2;
-                    }
+                    self.acc_dirty[0] = nnue::DirtyPiece { piece: cap, color: them, from: to, to: nnue::SQ_NONE };
+                    self.acc_dirty[1] = nnue::DirtyPiece { piece, color: us, from, to };
+                    self.acc_dirty_num = 2;
                 }
                 FLAG_EP_CAPTURE => {
                     let cap_sq = match us {
@@ -513,6 +560,17 @@ impl Board {
                     self.acc_dirty_num = n + 1;
                 }
                 _ => {}
+            }
+            if piece == Piece::King && nnue::weight_version() >= 2 {
+                if us == Color::White {
+                    if nnue::king_bucket_of(from) != nnue::king_bucket_of(to) {
+                        self.acc_refresh_white = true;
+                    }
+                } else {
+                    if nnue::king_bucket_of(from ^ 56) != nnue::king_bucket_of(to ^ 56) {
+                        self.acc_refresh_black = true;
+                    }
+                }
             }
             self.acc_computed = false;
         }
@@ -540,7 +598,8 @@ impl Board {
             self.accumulator_q.psqt_white = prev.psqt_white;
             self.accumulator_q.psqt_black = prev.psqt_black;
             self.acc_computed = true;
-            self.acc_needs_refresh = false;
+            self.acc_refresh_white = false;
+            self.acc_refresh_black = false;
             self.acc_dirty_num = 0;
         }
         self.side = self.side.flip();

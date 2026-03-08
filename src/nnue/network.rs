@@ -134,6 +134,11 @@ pub fn is_active() -> bool {
 }
 
 #[inline]
+pub fn weight_version() -> u32 {
+    weights_q().version
+}
+
+#[inline]
 pub(super) fn weights() -> &'static NnueWeights {
     NNUE_STATE.get().unwrap()
 }
