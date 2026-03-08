@@ -9,6 +9,8 @@ pub const L2_INPUT: usize = 2 * L1_PAIR;
 pub const L2_SIZE: usize = 32;
 pub const INPUT_SIZE: usize = 768;
 pub const NUM_PSQT_BUCKETS: usize = 4;
+pub const NUM_LAYER_STACKS: usize = 4;
+pub const SKIP_SIZE: usize = 8;
 
 pub const QA: i32 = 255;
 pub const QB: i32 = 64;
