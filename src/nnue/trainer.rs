@@ -331,8 +331,15 @@ pub fn train(samples: &[TrainingSample], epochs: u32, batch_size: usize, lr: f32
     let mut g = Gradients::new();
     let mut indices: Vec<usize> = (0..samples.len()).collect();
     let mut rng = rand::thread_rng();
+    let mut current_lr = lr;
+    let drop_interval = (epochs / 4).max(1);
 
     for epoch in 0..epochs {
+        if epoch > 0 && epoch % drop_interval == 0 {
+            current_lr *= 0.5;
+            eprintln!("info string lr decay -> {:.6}", current_lr);
+        }
+
         indices.shuffle(&mut rng);
         let mut epoch_loss = 0.0f64;
         let mut epoch_count = 0usize;
@@ -348,7 +355,7 @@ pub fn train(samples: &[TrainingSample], epochs: u32, batch_size: usize, lr: f32
                 epoch_count += 1;
                 backward(&w, s, &fwd, lambda, &mut g);
             }
-            sgd_step(&mut w, &g, lr);
+            sgd_step(&mut w, &g, current_lr);
         }
 
         let avg_loss = if epoch_count > 0 { epoch_loss / epoch_count as f64 } else { 0.0 };
