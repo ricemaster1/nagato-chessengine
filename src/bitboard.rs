@@ -96,6 +96,19 @@ impl Piece {
         self as usize
     }
 
+    #[inline]
+    pub fn from_index(i: usize) -> Piece {
+        match i {
+            0 => Piece::Pawn,
+            1 => Piece::Knight,
+            2 => Piece::Bishop,
+            3 => Piece::Rook,
+            4 => Piece::Queen,
+            5 => Piece::King,
+            _ => panic!("invalid piece index"),
+        }
+    }
+
     pub fn from_char(c: char) -> Option<Piece> {
         match c.to_ascii_lowercase() {
             'p' => Some(Piece::Pawn),

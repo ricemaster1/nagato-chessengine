@@ -2,6 +2,7 @@ pub mod features;
 pub mod accumulator;
 pub mod network;
 pub mod simd;
+pub mod trainer;
 
 pub const L1_SIZE: usize = 256;
 pub const L1_PAIR: usize = L1_SIZE / 2;

@@ -90,6 +90,9 @@ fn write_entry(buf: &mut Vec<u8>, board: &Board, score_white: i16, wdl: u8) {
     buf.push(0);
     debug_assert_eq!(buf.len() % ENTRY_SIZE, 0);
 }
+pub fn write_entry_pub(buf: &mut Vec<u8>, board: &Board, score_white: i16, wdl: u8) {
+    write_entry(buf, board, score_white, wdl);
+}
 pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32) {
     use rand::Rng;
 
