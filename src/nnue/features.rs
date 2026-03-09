@@ -79,6 +79,28 @@ pub fn feature_index_black(piece: Piece, color: Color, sq: u8) -> usize {
     color_offset + piece.index() * 64 + flipped as usize
 }
 
+pub const THREAT_PIECES: usize = 5;
+pub const THREAT_PER_COLOR: usize = THREAT_PIECES * 64;
+pub const THREAT_FEATURES: usize = THREAT_PER_COLOR * 2;
+
+pub const FT_SIZE: usize = KING_BUCKETS * PER_BUCKET_FEATURES;
+pub const FT_SIZE_THREATS: usize = FT_SIZE + THREAT_FEATURES;
+
+#[inline]
+pub fn threat_feature_white(piece: Piece, sq: u8, attacker_is_white: bool) -> usize {
+    let pi = piece_index_no_king(piece).expect("King has no threat feature");
+    let color_off = if attacker_is_white { 0 } else { THREAT_PER_COLOR };
+    FT_SIZE + color_off + pi * 64 + sq as usize
+}
+
+#[inline]
+pub fn threat_feature_black(piece: Piece, sq: u8, attacker_is_white: bool) -> usize {
+    let pi = piece_index_no_king(piece).expect("King has no threat feature");
+    let flipped = sq ^ 56;
+    let color_off = if attacker_is_white { THREAT_PER_COLOR } else { 0 };
+    FT_SIZE + color_off + pi * 64 + flipped as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +207,24 @@ mod tests {
         assert_eq!(piece_index_no_king(Piece::Rook), Some(3));
         assert_eq!(piece_index_no_king(Piece::Queen), Some(4));
         assert_eq!(piece_index_no_king(Piece::King), None);
+    }
+
+    #[test]
+    fn test_threat_feature_bounds() {
+        for &piece in &[Piece::Pawn, Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
+            for sq in 0..64u8 {
+                let w = threat_feature_white(piece, sq, true);
+                let b = threat_feature_black(piece, sq, false);
+                assert!(w < FT_SIZE_THREATS, "white threat idx {} >= {}", w, FT_SIZE_THREATS);
+                assert!(b < FT_SIZE_THREATS, "black threat idx {} >= {}", b, FT_SIZE_THREATS);
+            }
+        }
+    }
+
+    #[test]
+    fn test_threat_feature_symmetry() {
+        let w = threat_feature_white(Piece::Pawn, sq::E4, true);
+        let b = threat_feature_black(Piece::Pawn, sq::E5, false);
+        assert_eq!(w, b);
     }
 }
