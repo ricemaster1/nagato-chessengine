@@ -16,6 +16,45 @@ pub const SKIP_SIZE: usize = 8;
 pub const QA: i32 = 255;
 pub const QB: i32 = 64;
 
+pub struct ArchConfig {
+    pub l1_size: usize,
+    pub l2_size: usize,
+    pub num_layer_stacks: usize,
+    pub skip_size: usize,
+    pub num_psqt_buckets: usize,
+    pub king_buckets: usize,
+}
+
+impl ArchConfig {
+    pub const DEFAULT: Self = ArchConfig {
+        l1_size: L1_SIZE,
+        l2_size: L2_SIZE,
+        num_layer_stacks: NUM_LAYER_STACKS,
+        skip_size: SKIP_SIZE,
+        num_psqt_buckets: NUM_PSQT_BUCKETS,
+        king_buckets: 10,
+    };
+
+    pub const fn ft_size(&self) -> usize {
+        self.king_buckets * 5 * 64 * 2
+    }
+
+    pub const fn l1_pair(&self) -> usize {
+        self.l1_size / 2
+    }
+
+    pub const fn l2_input(&self) -> usize {
+        2 * self.l1_pair()
+    }
+
+    pub const fn total_params(&self) -> usize {
+        let ft = self.ft_size() * self.l1_size + self.l1_size;
+        let psqt = self.ft_size() * self.num_psqt_buckets;
+        let per_stack = self.l2_input() * self.l2_size + self.l2_size + self.l2_size + 1 + self.skip_size;
+        ft + psqt + self.num_layer_stacks * per_stack
+    }
+}
+
 pub use accumulator::{
     Accumulator,
     AccumulatorQ,
