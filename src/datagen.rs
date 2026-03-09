@@ -93,6 +93,25 @@ fn write_entry(buf: &mut Vec<u8>, board: &Board, score_white: i16, result: i8) {
 pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32) {
     use rand::Rng;
 
+    const OPENING_FENS: &[&str] = &[
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1",
+        "rnbqkbnr/ppp1pppp/8/3p4/2PP4/8/PP2PPPP/RNBQKBNR b KQkq - 0 2",
+        "rnbqkb1r/pppppppp/5n2/8/2PP4/8/PP2PPPP/RNBQKBNR b KQkq - 0 2",
+        "r1bqkbnr/pppppppp/2n5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 1 2",
+        "rnbqkbnr/pppppppp/8/8/2P5/8/PP1PPPPP/RNBQKBNR b KQkq - 0 1",
+        "rnbqkbnr/pppp1ppp/4p3/8/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2",
+        "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3",
+        "r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+        "rnbqkb1r/pppppp1p/5np1/8/2PP4/8/PP2PPPP/RNBQKBNR w KQkq - 0 3",
+        "rnbqkb1r/pppppp1p/5np1/8/2PP4/2N5/PP2PPPP/R1BQKBNR b KQkq - 1 3",
+        "rnbqkb1r/p1pppppp/1p6/8/2PP4/8/PP2PPPP/RNBQKBNR w KQkq - 0 3",
+    ];
+
     let mut tt = search::TranspositionTable::new(32);
     let exp = ExpTable::new();
     let mut rng = rand::thread_rng();
@@ -106,7 +125,8 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
         num_games, depth, random_plies, output_path);
 
     for game_idx in 0..num_games {
-        let mut board = Board::start_pos();
+        let fen_idx = rng.gen_range(0..OPENING_FENS.len());
+        let mut board = Board::from_fen(OPENING_FENS[fen_idx]).unwrap_or_else(|_| Board::start_pos());
         let mut positions: Vec<(Board, i16)> = Vec::new();
         let mut ply = 0u32;
         for _ in 0..random_plies {
