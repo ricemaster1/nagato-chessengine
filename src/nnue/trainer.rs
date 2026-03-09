@@ -184,6 +184,127 @@ pub fn forward(w: &TrainableWeights, s: &TrainingSample) -> ForwardResult {
     ForwardResult { l1_white: l1_w, l1_black: l1_b, pw, l2_in, l2_out, psqt_stm, psqt_opp, positional, output, stack }
 }
 
+const SIGMOID_K: f32 = 400.0;
+
+fn sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x / SIGMOID_K).exp()) }
+
+pub fn loss(pred: f32, target_score: f32, wdl: f32, lambda: f32) -> f32 {
+    let p = sigmoid(pred);
+    let t_eval = sigmoid(target_score);
+    let mse = (p - t_eval).powi(2);
+    let ce = -(wdl * p.max(1e-7).ln() + (1.0 - wdl) * (1.0 - p).max(1e-7).ln());
+    lambda * mse + (1.0 - lambda) * ce
+}
+
+pub struct Gradients {
+    pub ft_w: Vec<[f32; L1_SIZE]>,
+    pub ft_b: [f32; L1_SIZE],
+    pub psqt_w: Vec<[f32; NUM_PSQT_BUCKETS]>,
+    pub l2_w: [Vec<[f32; L2_SIZE]>; NUM_LAYER_STACKS],
+    pub l2_b: [[f32; L2_SIZE]; NUM_LAYER_STACKS],
+    pub out_w: [[f32; L2_SIZE]; NUM_LAYER_STACKS],
+    pub out_b: [f32; NUM_LAYER_STACKS],
+    pub skip_w: [[f32; SKIP_SIZE]; NUM_LAYER_STACKS],
+    pub count: usize,
+}
+
+impl Gradients {
+    pub fn new() -> Self {
+        Gradients {
+            ft_w: vec![[0.0; L1_SIZE]; FT_SIZE],
+            ft_b: [0.0; L1_SIZE],
+            psqt_w: vec![[0.0; NUM_PSQT_BUCKETS]; FT_SIZE],
+            l2_w: std::array::from_fn(|_| vec![[0.0; L2_SIZE]; L2_INPUT]),
+            l2_b: [[0.0; L2_SIZE]; NUM_LAYER_STACKS],
+            out_w: [[0.0; L2_SIZE]; NUM_LAYER_STACKS],
+            out_b: [0.0; NUM_LAYER_STACKS],
+            skip_w: [[0.0; SKIP_SIZE]; NUM_LAYER_STACKS],
+            count: 0,
+        }
+    }
+
+    pub fn zero(&mut self) {
+        for r in self.ft_w.iter_mut() { *r = [0.0; L1_SIZE]; }
+        self.ft_b = [0.0; L1_SIZE];
+        for r in self.psqt_w.iter_mut() { *r = [0.0; NUM_PSQT_BUCKETS]; }
+        for s in 0..NUM_LAYER_STACKS {
+            for r in self.l2_w[s].iter_mut() { *r = [0.0; L2_SIZE]; }
+            self.l2_b[s] = [0.0; L2_SIZE];
+            self.out_w[s] = [0.0; L2_SIZE];
+            self.out_b[s] = 0.0;
+            self.skip_w[s] = [0.0; SKIP_SIZE];
+        }
+        self.count = 0;
+    }
+}
+
+fn dcrelu(x: f32) -> f32 { if x > 0.0 && x < 1.0 { 1.0 } else { 0.0 } }
+
+pub fn backward(w: &TrainableWeights, s: &TrainingSample, fwd: &ForwardResult, lambda: f32, g: &mut Gradients) {
+    let p = sigmoid(fwd.output);
+    let t = sigmoid(s.score);
+    let dp_sig = p * (1.0 - p) / SIGMOID_K;
+    let d_loss = 2.0 * lambda * (p - t) * dp_sig
+               + (1.0 - lambda) * (p - s.wdl) * dp_sig / (p * (1.0 - p) + 1e-7) * p * (1.0 - p);
+
+    let d_out = d_loss;
+    let stack = fwd.stack;
+
+    g.out_b[stack] += d_out;
+    for j in 0..L2_SIZE { g.out_w[stack][j] += d_out * fwd.l2_out[j]; }
+    for j in 0..SKIP_SIZE { g.skip_w[stack][j] += d_out * fwd.l2_in[j]; }
+
+    let mut d_l2_out = [0.0f32; L2_SIZE];
+    for j in 0..L2_SIZE { d_l2_out[j] = d_out * w.out_w[stack][j] * dcrelu(fwd.l2_out[j]); }
+
+    let mut d_l2_in = [0.0f32; L2_INPUT];
+    for i in 0..L2_INPUT {
+        for j in 0..L2_SIZE {
+            d_l2_in[i] += d_l2_out[j] * w.l2_w[stack][i][j];
+            g.l2_w[stack][i][j] += d_l2_out[j] * fwd.l2_in[i];
+        }
+    }
+    for j in 0..L2_SIZE { g.l2_b[stack][j] += d_l2_out[j]; }
+    for j in 0..SKIP_SIZE { d_l2_in[j] += d_out * w.skip_w[stack][j]; }
+
+    let (stm_l1, opp_l1) = match s.stm {
+        Color::White => (&fwd.l1_white, &fwd.l1_black),
+        Color::Black => (&fwd.l1_black, &fwd.l1_white),
+    };
+
+    let mut d_stm = [0.0f32; L1_SIZE];
+    let mut d_opp = [0.0f32; L1_SIZE];
+    for i in 0..L1_PAIR {
+        let a = crelu(stm_l1[i]);
+        let b = crelu(stm_l1[i + L1_PAIR]);
+        d_stm[i] += d_l2_in[i] * b * dcrelu(stm_l1[i]);
+        d_stm[i + L1_PAIR] += d_l2_in[i] * a * dcrelu(stm_l1[i + L1_PAIR]);
+        let a2 = crelu(opp_l1[i]);
+        let b2 = crelu(opp_l1[i + L1_PAIR]);
+        d_opp[i] += d_l2_in[L1_PAIR + i] * b2 * dcrelu(opp_l1[i]);
+        d_opp[i + L1_PAIR] += d_l2_in[L1_PAIR + i] * a2 * dcrelu(opp_l1[i + L1_PAIR]);
+    }
+
+    let (d_white, d_black) = match s.stm {
+        Color::White => (&d_stm, &d_opp),
+        Color::Black => (&d_opp, &d_stm),
+    };
+    for j in 0..L1_SIZE { g.ft_b[j] += d_white[j] + d_black[j]; }
+    for &fi in &s.white_features { for j in 0..L1_SIZE { g.ft_w[fi][j] += d_white[j]; } }
+    for &fi in &s.black_features { for j in 0..L1_SIZE { g.ft_w[fi][j] += d_black[j]; } }
+
+    let d_psqt_stm = d_loss;
+    let d_psqt_opp = -d_loss;
+    let (stm_feats, opp_feats) = match s.stm {
+        Color::White => (&s.white_features, &s.black_features),
+        Color::Black => (&s.black_features, &s.white_features),
+    };
+    for &fi in stm_feats { g.psqt_w[fi][stack] += d_psqt_stm; }
+    for &fi in opp_feats { g.psqt_w[fi][stack] += d_psqt_opp; }
+
+    g.count += 1;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
