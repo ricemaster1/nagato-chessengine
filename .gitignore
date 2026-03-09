@@ -25,8 +25,8 @@ data/
 scripts/
 
 # NNUE weights & training data
-nn.bin
-training_data.bin
+*.bin
+*_log.txt
 
 # Tablebase files and pgn (too large for git)
 *.rtbw

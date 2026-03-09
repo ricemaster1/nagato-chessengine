@@ -78,7 +78,7 @@ pub fn unpack_board(packed: &[u8; 32], side: Color, castling: u8, ep_file: u8) -
     board.hash = board.compute_hash();
     board
 }
-fn write_entry(buf: &mut Vec<u8>, board: &Board, score_white: i16, result: i8) {
+fn write_entry(buf: &mut Vec<u8>, board: &Board, score_white: i16, wdl: u8) {
     let packed = pack_board(board);
     buf.extend_from_slice(&packed);
     buf.push(board.side as u8);
@@ -86,12 +86,34 @@ fn write_entry(buf: &mut Vec<u8>, board: &Board, score_white: i16, result: i8) {
     buf.push(board.ep_square.map_or(255, |sq| file_of(sq)));
     buf.push(0);
     buf.extend_from_slice(&score_white.to_le_bytes());
-    buf.push(result as u8);
+    buf.push(wdl);
     buf.push(0);
     debug_assert_eq!(buf.len() % ENTRY_SIZE, 0);
 }
+pub fn write_entry_pub(buf: &mut Vec<u8>, board: &Board, score_white: i16, wdl: u8) {
+    write_entry(buf, board, score_white, wdl);
+}
 pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32) {
     use rand::Rng;
+
+    const OPENING_FENS: &[&str] = &[
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1",
+        "rnbqkbnr/ppp1pppp/8/3p4/2PP4/8/PP2PPPP/RNBQKBNR b KQkq - 0 2",
+        "rnbqkb1r/pppppppp/5n2/8/2PP4/8/PP2PPPP/RNBQKBNR b KQkq - 0 2",
+        "r1bqkbnr/pppppppp/2n5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 1 2",
+        "rnbqkbnr/pppppppp/8/8/2P5/8/PP1PPPPP/RNBQKBNR b KQkq - 0 1",
+        "rnbqkbnr/pppp1ppp/4p3/8/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2",
+        "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3",
+        "r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+        "rnbqkb1r/pppppp1p/5np1/8/2PP4/8/PP2PPPP/RNBQKBNR w KQkq - 0 3",
+        "rnbqkb1r/pppppp1p/5np1/8/2PP4/2N5/PP2PPPP/R1BQKBNR b KQkq - 1 3",
+        "rnbqkb1r/p1pppppp/1p6/8/2PP4/8/PP2PPPP/RNBQKBNR w KQkq - 0 3",
+    ];
 
     let mut tt = search::TranspositionTable::new(32);
     let exp = ExpTable::new();
@@ -106,7 +128,8 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
         num_games, depth, random_plies, output_path);
 
     for game_idx in 0..num_games {
-        let mut board = Board::start_pos();
+        let fen_idx = rng.gen_range(0..OPENING_FENS.len());
+        let mut board = Board::from_fen(OPENING_FENS[fen_idx]).unwrap_or_else(|_| Board::start_pos());
         let mut positions: Vec<(Board, i16)> = Vec::new();
         let mut ply = 0u32;
         for _ in 0..random_plies {
@@ -129,8 +152,9 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
                 break;
             }
         }
-        let mut result: i8 = 0;
-        let mut consecutive_no_progress = 0u32;
+        let mut wdl: u8 = 1;
+        let mut win_adj = 0u32;
+        let mut draw_adj = 0u32;
 
         loop {
             let mut list = MoveList::new();
@@ -148,56 +172,36 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
 
             if !has_legal {
                 if board.in_check() {
-                    result = match board.side {
-                        Color::White => -1,
-                        Color::Black => 1,
-                    };
+                    wdl = if board.side == Color::White { 0 } else { 2 };
                 }
                 break;
             }
-            if board.halfmove >= 100 {
-                result = 0;
-                break;
-            }
-            if ply > 400 {
-                result = 0;
+            if board.halfmove >= 100 || ply > 400 {
                 break;
             }
             tt.clear();
             let search_result = search::search(&mut board, &mut tt, &exp, 0, depth);
             let score = search_result.score;
             if score.abs() > eval::MATE_THRESHOLD {
-                if score > 0 {
-                    result = match board.side {
-                        Color::White => 1,
-                        Color::Black => -1,
-                    };
-                } else {
-                    result = match board.side {
-                        Color::White => -1,
-                        Color::Black => 1,
-                    };
-                }
+                wdl = if (score > 0) == (board.side == Color::White) { 2 } else { 0 };
                 break;
             }
-            if ply > 40 && score.abs() > 1000 {
-                consecutive_no_progress += 1;
-                if consecutive_no_progress > 5 {
-                    if score > 0 {
-                        result = match board.side {
-                            Color::White => 1,
-                            Color::Black => -1,
-                        };
-                    } else {
-                        result = match board.side {
-                            Color::White => -1,
-                            Color::Black => 1,
-                        };
-                    }
+            if score.abs() > 1000 {
+                win_adj += 1;
+                draw_adj = 0;
+                if win_adj >= 3 {
+                    wdl = if (score > 0) == (board.side == Color::White) { 2 } else { 0 };
+                    break;
+                }
+            } else if score.abs() < 10 {
+                draw_adj += 1;
+                win_adj = 0;
+                if draw_adj >= 8 && ply > 60 {
                     break;
                 }
             } else {
-                consecutive_no_progress = 0;
+                win_adj = 0;
+                draw_adj = 0;
             }
             if !board.in_check() && score.abs() < 5000 {
                 let score_white = match board.side {
@@ -214,7 +218,7 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
             ply += 1;
         }
         for (pos, score) in &positions {
-            write_entry(&mut buf, pos, *score, result);
+            write_entry(&mut buf, pos, *score, wdl);
             total_positions += 1;
         }
 
