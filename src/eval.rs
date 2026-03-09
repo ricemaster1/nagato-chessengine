@@ -115,8 +115,24 @@ fn compute_phase(board: &Board) -> i32 {
     phase.max(0)
 }
 
+const DUAL_NET_THRESHOLD: i32 = ROOK_VALUE * 2;
+
+fn material_balance(board: &Board) -> i32 {
+    let mut balance = 0i32;
+    for piece in 0..PIECE_COUNT - 1 {
+        let w = popcount(board.pieces[Color::White.index()][piece]) as i32;
+        let b = popcount(board.pieces[Color::Black.index()][piece]) as i32;
+        balance += (w - b) * PIECE_VALUES[piece];
+    }
+    balance
+}
+
 pub fn evaluate(board: &Board) -> i32 {
     if nnue::is_active() {
+        let mb = material_balance(board);
+        if mb.abs() >= DUAL_NET_THRESHOLD {
+            return evaluate_hce(board);
+        }
         return nnue::evaluate_q(board, &board.accumulator_q);
     }
 
