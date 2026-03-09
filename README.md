@@ -22,19 +22,25 @@ then type `uci` and go from there
 
 ## features
 
-- bitboard based board representation
-- magic bitboards for sliding pieces
-- negamax with alpha-beta pruning
-- principal variation search
-- iterative deepening
-- transposition table
-- null move pruning
-- late move reductions
+- bitboard board representation with magic bitboards for sliding pieces
+- negamax with alpha-beta pruning and principal variation search
+- iterative deepening with transposition table
+- null move pruning and late move reductions
 - killer moves + history heuristic
 - quiescence search
-- tapered eval with piece square tables
-- pawn structure evaluation
-- king safety
+- NNUE evaluation (HalfKP, 10 king buckets, horizontal mirroring)
+- architecture: 6400→256→pairwise(128)→[4×(128→32→1)] + skip[8] + PSQT[4]
+- quantized int16/int8 inference with NEON SIMD
+- incremental accumulator updates with Finny cache
+- lazy eval with DirtyPiece tracking
+- dual network routing (HCE fallback for lopsided material)
+- threat/attack feature encoding
+- LEB128 weight compression
+- architecture config for net parameter experiments
+- self-play data generation with opening book and adjudication
+- NNUE trainer with WDL-aware loss and LR decay
+- experience table for search corrections
+- tapered HCE with piece square tables, pawn structure, king safety
 - uci protocol
 
 ## why "nagato"
