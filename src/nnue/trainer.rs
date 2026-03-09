@@ -94,27 +94,28 @@ impl TrainableWeights {
     pub fn new_random() -> Self {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        let scale = 0.01f32;
+        let ft_scale = 0.01f32;
 
         let mut ft_w = vec![[0.0f32; L1_SIZE]; FT_SIZE];
         for row in ft_w.iter_mut() {
-            for v in row.iter_mut() { *v = rng.gen_range(-scale..scale); }
+            for v in row.iter_mut() { *v = rng.gen_range(-ft_scale..ft_scale); }
         }
         let mut ft_b = [0.0f32; L1_SIZE];
-        for v in ft_b.iter_mut() { *v = rng.gen_range(-scale..scale); }
+        for v in ft_b.iter_mut() { *v = 0.5 + rng.gen_range(-0.05..0.05); }
 
         let psqt_w = vec![[0.0f32; NUM_PSQT_BUCKETS]; FT_SIZE];
 
+        let l2_scale = (2.0 / L2_INPUT as f32).sqrt();
         let l2_w: [Vec<[f32; L2_SIZE]>; NUM_LAYER_STACKS] = std::array::from_fn(|_| {
             let mut w = vec![[0.0f32; L2_SIZE]; L2_INPUT];
-            for row in w.iter_mut() { for v in row.iter_mut() { *v = rng.gen_range(-scale..scale); } }
+            for row in w.iter_mut() { for v in row.iter_mut() { *v = rng.gen_range(-l2_scale..l2_scale); } }
             w
         });
-        let mut l2_b = [[0.0f32; L2_SIZE]; NUM_LAYER_STACKS];
-        for s in l2_b.iter_mut() { for v in s.iter_mut() { *v = rng.gen_range(-scale..scale); } }
+        let l2_b = [[0.0f32; L2_SIZE]; NUM_LAYER_STACKS];
 
+        let out_scale = (2.0 / L2_SIZE as f32).sqrt();
         let mut out_w = [[0.0f32; L2_SIZE]; NUM_LAYER_STACKS];
-        for s in out_w.iter_mut() { for v in s.iter_mut() { *v = rng.gen_range(-scale..scale); } }
+        for s in out_w.iter_mut() { for v in s.iter_mut() { *v = rng.gen_range(-out_scale..out_scale); } }
         let out_b = [0.0f32; NUM_LAYER_STACKS];
         let skip_w = [[0.0f32; SKIP_SIZE]; NUM_LAYER_STACKS];
 
@@ -243,11 +244,7 @@ fn dcrelu(x: f32) -> f32 { if x > 0.0 && x < 1.0 { 1.0 } else { 0.0 } }
 pub fn backward(w: &TrainableWeights, s: &TrainingSample, fwd: &ForwardResult, lambda: f32, g: &mut Gradients) {
     let p = sigmoid(fwd.output);
     let t = sigmoid(s.score);
-    let dp_sig = p * (1.0 - p) / SIGMOID_K;
-    let d_loss = 2.0 * lambda * (p - t) * dp_sig
-               + (1.0 - lambda) * (p - s.wdl) * dp_sig / (p * (1.0 - p) + 1e-7) * p * (1.0 - p);
-
-    let d_out = d_loss;
+    let d_out = lambda * 2.0 * (p - t) + (1.0 - lambda) * (p - s.wdl);
     let stack = fwd.stack;
 
     g.out_b[stack] += d_out;
@@ -293,8 +290,8 @@ pub fn backward(w: &TrainableWeights, s: &TrainingSample, fwd: &ForwardResult, l
     for &fi in &s.white_features { for j in 0..L1_SIZE { g.ft_w[fi][j] += d_white[j]; } }
     for &fi in &s.black_features { for j in 0..L1_SIZE { g.ft_w[fi][j] += d_black[j]; } }
 
-    let d_psqt_stm = d_loss;
-    let d_psqt_opp = -d_loss;
+    let d_psqt_stm = d_out;
+    let d_psqt_opp = -d_out;
     let (stm_feats, opp_feats) = match s.stm {
         Color::White => (&s.white_features, &s.black_features),
         Color::Black => (&s.black_features, &s.white_features),
