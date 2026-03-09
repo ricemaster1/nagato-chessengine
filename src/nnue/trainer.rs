@@ -360,6 +360,31 @@ pub fn train(samples: &[TrainingSample], epochs: u32, batch_size: usize, lr: f32
     w
 }
 
+pub fn save_weights(w: &TrainableWeights, path: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(b"NAGT")?;
+    f.write_all(&3u32.to_le_bytes())?;
+
+    for i in 0..w.ft_w.len() {
+        for j in 0..L1_SIZE { f.write_all(&w.ft_w[i][j].to_le_bytes())?; }
+    }
+    for j in 0..L1_SIZE { f.write_all(&w.ft_b[j].to_le_bytes())?; }
+    for i in 0..w.psqt_w.len() {
+        for b in 0..NUM_PSQT_BUCKETS { f.write_all(&w.psqt_w[i][b].to_le_bytes())?; }
+    }
+    for s in 0..NUM_LAYER_STACKS {
+        for i in 0..L2_INPUT {
+            for j in 0..L2_SIZE { f.write_all(&w.l2_w[s][i][j].to_le_bytes())?; }
+        }
+        for j in 0..L2_SIZE { f.write_all(&w.l2_b[s][j].to_le_bytes())?; }
+        for j in 0..L2_SIZE { f.write_all(&w.out_w[s][j].to_le_bytes())?; }
+        f.write_all(&w.out_b[s].to_le_bytes())?;
+        for j in 0..SKIP_SIZE { f.write_all(&w.skip_w[s][j].to_le_bytes())?; }
+    }
+    f.flush()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,5 +408,21 @@ mod tests {
         assert!((sample.score - 25.0).abs() < 0.01);
         assert!((sample.wdl - 1.0).abs() < 0.01);
         assert_eq!(sample.piece_count, 30);
+    }
+
+    #[test]
+    fn test_save_load_roundtrip() {
+        let w = TrainableWeights::new_random();
+        let path = "/tmp/nagato_test_nn.bin";
+        save_weights(&w, path).unwrap();
+        let loaded = super::super::network::load_weights_from_file(std::path::Path::new(path)).unwrap();
+        assert_eq!(loaded.version, 3);
+        for j in 0..L1_SIZE {
+            assert!((w.ft_b[j] - loaded.l1_biases[j]).abs() < 1e-6);
+        }
+        for j in 0..L2_SIZE {
+            assert!((w.out_w[0][j] - loaded.output_weights[0][j]).abs() < 1e-6);
+        }
+        let _ = std::fs::remove_file(path);
     }
 }
