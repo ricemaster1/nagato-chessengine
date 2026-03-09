@@ -305,6 +305,61 @@ pub fn backward(w: &TrainableWeights, s: &TrainingSample, fwd: &ForwardResult, l
     g.count += 1;
 }
 
+pub fn sgd_step(w: &mut TrainableWeights, g: &Gradients, lr: f32) {
+    if g.count == 0 { return; }
+    let scale = lr / g.count as f32;
+
+    for i in 0..w.ft_w.len() {
+        for j in 0..L1_SIZE { w.ft_w[i][j] -= scale * g.ft_w[i][j]; }
+    }
+    for j in 0..L1_SIZE { w.ft_b[j] -= scale * g.ft_b[j]; }
+    for i in 0..w.psqt_w.len() {
+        for b in 0..NUM_PSQT_BUCKETS { w.psqt_w[i][b] -= scale * g.psqt_w[i][b]; }
+    }
+    for s in 0..NUM_LAYER_STACKS {
+        for i in 0..L2_INPUT {
+            for j in 0..L2_SIZE { w.l2_w[s][i][j] -= scale * g.l2_w[s][i][j]; }
+        }
+        for j in 0..L2_SIZE { w.l2_b[s][j] -= scale * g.l2_b[s][j]; }
+        for j in 0..L2_SIZE { w.out_w[s][j] -= scale * g.out_w[s][j]; }
+        w.out_b[s] -= scale * g.out_b[s];
+        for j in 0..SKIP_SIZE { w.skip_w[s][j] -= scale * g.skip_w[s][j]; }
+    }
+}
+
+pub fn train(samples: &[TrainingSample], epochs: u32, batch_size: usize, lr: f32, lambda: f32) -> TrainableWeights {
+    use rand::seq::SliceRandom;
+
+    let mut w = TrainableWeights::new_random();
+    let mut g = Gradients::new();
+    let mut indices: Vec<usize> = (0..samples.len()).collect();
+    let mut rng = rand::thread_rng();
+
+    for epoch in 0..epochs {
+        indices.shuffle(&mut rng);
+        let mut epoch_loss = 0.0f64;
+        let mut epoch_count = 0usize;
+
+        for batch_start in (0..indices.len()).step_by(batch_size) {
+            let batch_end = (batch_start + batch_size).min(indices.len());
+            g.zero();
+
+            for &idx in &indices[batch_start..batch_end] {
+                let s = &samples[idx];
+                let fwd = forward(&w, s);
+                epoch_loss += loss(fwd.output, s.score, s.wdl, lambda) as f64;
+                epoch_count += 1;
+                backward(&w, s, &fwd, lambda, &mut g);
+            }
+            sgd_step(&mut w, &g, lr);
+        }
+
+        let avg_loss = if epoch_count > 0 { epoch_loss / epoch_count as f64 } else { 0.0 };
+        eprintln!("info string epoch {}/{} loss {:.6}", epoch + 1, epochs, avg_loss);
+    }
+    w
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
