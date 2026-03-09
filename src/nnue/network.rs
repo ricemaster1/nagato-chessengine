@@ -382,6 +382,85 @@ pub fn evaluate_q(board: &Board, acc: &AccumulatorQ) -> i32 {
     forward_q(acc, board.side, psqt, board.piece_count())
 }
 
+pub fn leb128_encode_i32(val: i32, buf: &mut Vec<u8>) {
+    let mut v = val;
+    loop {
+        let byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if (v == 0 && byte & 0x40 == 0) || (v == -1 && byte & 0x40 != 0) {
+            buf.push(byte);
+            return;
+        }
+        buf.push(byte | 0x80);
+    }
+}
+
+pub fn leb128_decode_i32(data: &[u8], cursor: &mut usize) -> Result<i32, String> {
+    let mut result: i32 = 0;
+    let mut shift = 0u32;
+    loop {
+        if *cursor >= data.len() { return Err("unexpected EOF in LEB128".into()); }
+        let byte = data[*cursor];
+        *cursor += 1;
+        result |= ((byte & 0x7f) as i32) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            if shift < 32 && byte & 0x40 != 0 {
+                result |= !0i32 << shift;
+            }
+            return Ok(result);
+        }
+        if shift >= 35 { return Err("LEB128 overflow".into()); }
+    }
+}
+
+pub fn save_weights_leb128(w: &NnueWeights, path: &str) -> Result<(), String> {
+    use std::io::Write;
+    let qa = QA as f32;
+    let qb = QB as f32;
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"NAGL");
+    buf.extend_from_slice(&w.version.to_le_bytes());
+
+    let l1_rows = w.l1_weights.len();
+    for i in 0..l1_rows {
+        for j in 0..L1_SIZE {
+            leb128_encode_i32((w.l1_weights[i][j] * qa).round() as i32, &mut buf);
+        }
+    }
+    for j in 0..L1_SIZE {
+        leb128_encode_i32((w.l1_biases[j] * qa).round() as i32, &mut buf);
+    }
+    for i in 0..l1_rows {
+        for b in 0..NUM_PSQT_BUCKETS {
+            leb128_encode_i32((w.psqt_weights[i][b] * qa).round() as i32, &mut buf);
+        }
+    }
+    let num_stacks = if w.version <= 2 { 1 } else { NUM_LAYER_STACKS };
+    for s in 0..num_stacks {
+        for i in 0..L2_INPUT {
+            for j in 0..L2_SIZE {
+                leb128_encode_i32((w.l2_weights[s][i][j] * qb).round() as i32, &mut buf);
+            }
+        }
+        for j in 0..L2_SIZE {
+            leb128_encode_i32((w.l2_biases[s][j] * qa * qb).round() as i32, &mut buf);
+        }
+        for j in 0..L2_SIZE {
+            leb128_encode_i32((w.output_weights[s][j] * qb).round() as i32, &mut buf);
+        }
+        leb128_encode_i32((w.output_bias[s] * qb * qb).round() as i32, &mut buf);
+        if w.version >= 3 {
+            for j in 0..SKIP_SIZE {
+                leb128_encode_i32((w.skip_weights[s][j] * qb).round() as i32, &mut buf);
+            }
+        }
+    }
+    let mut file = std::fs::File::create(path).map_err(|e| format!("create: {}", e))?;
+    file.write_all(&buf).map_err(|e| format!("write: {}", e))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,5 +793,30 @@ mod tests {
         let ns_per = elapsed.as_nanos() as f64 / iterations as f64;
         println!("forward_q: {} iterations in {:.2?} ({:.0} ns/iter, {:.1} M evals/s) [sum={}]",
             iterations, elapsed, ns_per, 1e9 / ns_per / 1e6, sum);
+    }
+
+    #[test]
+    fn test_leb128_roundtrip() {
+        for val in [0, 1, -1, 127, -128, 255, -256, 32767, -32768, i32::MAX, i32::MIN] {
+            let mut buf = Vec::new();
+            leb128_encode_i32(val, &mut buf);
+            let mut cursor = 0;
+            let decoded = leb128_decode_i32(&buf, &mut cursor).unwrap();
+            assert_eq!(val, decoded, "LEB128 roundtrip failed for {}", val);
+            assert_eq!(cursor, buf.len());
+        }
+    }
+
+    #[test]
+    fn test_leb128_small_values_compress() {
+        let mut buf = Vec::new();
+        leb128_encode_i32(0, &mut buf);
+        assert_eq!(buf.len(), 1);
+        buf.clear();
+        leb128_encode_i32(63, &mut buf);
+        assert_eq!(buf.len(), 1);
+        buf.clear();
+        leb128_encode_i32(-64, &mut buf);
+        assert_eq!(buf.len(), 1);
     }
 }
