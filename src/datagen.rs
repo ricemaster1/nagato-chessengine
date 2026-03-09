@@ -150,7 +150,8 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
             }
         }
         let mut result: i8 = 0;
-        let mut consecutive_no_progress = 0u32;
+        let mut win_adj = 0u32;
+        let mut draw_adj = 0u32;
 
         loop {
             let mut list = MoveList::new();
@@ -175,49 +176,32 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
                 }
                 break;
             }
-            if board.halfmove >= 100 {
-                result = 0;
-                break;
-            }
-            if ply > 400 {
-                result = 0;
+            if board.halfmove >= 100 || ply > 400 {
                 break;
             }
             tt.clear();
             let search_result = search::search(&mut board, &mut tt, &exp, 0, depth);
             let score = search_result.score;
             if score.abs() > eval::MATE_THRESHOLD {
-                if score > 0 {
-                    result = match board.side {
-                        Color::White => 1,
-                        Color::Black => -1,
-                    };
-                } else {
-                    result = match board.side {
-                        Color::White => -1,
-                        Color::Black => 1,
-                    };
-                }
+                result = if (score > 0) == (board.side == Color::White) { 1 } else { -1 };
                 break;
             }
-            if ply > 40 && score.abs() > 1000 {
-                consecutive_no_progress += 1;
-                if consecutive_no_progress > 5 {
-                    if score > 0 {
-                        result = match board.side {
-                            Color::White => 1,
-                            Color::Black => -1,
-                        };
-                    } else {
-                        result = match board.side {
-                            Color::White => -1,
-                            Color::Black => 1,
-                        };
-                    }
+            if score.abs() > 1000 {
+                win_adj += 1;
+                draw_adj = 0;
+                if win_adj >= 3 {
+                    result = if (score > 0) == (board.side == Color::White) { 1 } else { -1 };
+                    break;
+                }
+            } else if score.abs() < 10 {
+                draw_adj += 1;
+                win_adj = 0;
+                if draw_adj >= 8 && ply > 60 {
                     break;
                 }
             } else {
-                consecutive_no_progress = 0;
+                win_adj = 0;
+                draw_adj = 0;
             }
             if !board.in_check() && score.abs() < 5000 {
                 let score_white = match board.side {
