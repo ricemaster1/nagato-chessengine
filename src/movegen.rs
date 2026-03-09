@@ -361,6 +361,40 @@ pub fn pawn_attacks(sq: u8, color: Color) -> Bitboard {
     }
 }
 
+pub struct AttackMap {
+    pub by_piece: [Bitboard; PIECE_COUNT],
+    pub all: Bitboard,
+}
+
+pub fn compute_attack_map(board: &Board, color: Color) -> AttackMap {
+    let ci = color.index();
+    let occ = board.all_occupancy;
+    let mut map = AttackMap { by_piece: [0; PIECE_COUNT], all: 0 };
+
+    map.by_piece[Piece::Pawn.index()] = match color {
+        Color::White => white_pawn_attacks(board.pieces[ci][Piece::Pawn.index()]),
+        Color::Black => black_pawn_attacks(board.pieces[ci][Piece::Pawn.index()]),
+    };
+
+    let mut bb = board.pieces[ci][Piece::Knight.index()];
+    while bb != 0 { map.by_piece[Piece::Knight.index()] |= knight_attacks(pop_lsb(&mut bb)); }
+
+    let mut bb = board.pieces[ci][Piece::Bishop.index()];
+    while bb != 0 { map.by_piece[Piece::Bishop.index()] |= bishop_attacks(pop_lsb(&mut bb), occ); }
+
+    let mut bb = board.pieces[ci][Piece::Rook.index()];
+    while bb != 0 { map.by_piece[Piece::Rook.index()] |= rook_attacks(pop_lsb(&mut bb), occ); }
+
+    let mut bb = board.pieces[ci][Piece::Queen.index()];
+    while bb != 0 { map.by_piece[Piece::Queen.index()] |= queen_attacks(pop_lsb(&mut bb), occ); }
+
+    let king_sq = lsb(board.pieces[ci][Piece::King.index()]);
+    map.by_piece[Piece::King.index()] = king_attacks(king_sq);
+
+    for i in 0..PIECE_COUNT { map.all |= map.by_piece[i]; }
+    map
+}
+
 pub fn generate_moves(board: &Board, list: &mut MoveList) {
     let us = board.side;
     let them = us.flip();
