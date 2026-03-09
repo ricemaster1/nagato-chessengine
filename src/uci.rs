@@ -129,6 +129,7 @@ pub fn uci_loop() {
                 }
             }
             "eval" => {
+                board.ensure_acc_computed();
                 let score = eval::evaluate(&board);
                 println!("Eval: {} cp (from {}'s perspective)",
                     score,

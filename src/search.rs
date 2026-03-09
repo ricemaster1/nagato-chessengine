@@ -231,6 +231,7 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInf
         return 0;
     }
 
+    board.ensure_acc_computed();
     let stand_pat = eval::evaluate(board);
 
     if stand_pat >= beta {
@@ -409,6 +410,7 @@ fn alpha_beta(
     }
 
     let static_eval = if !in_check {
+        board.ensure_acc_computed();
         eval::evaluate(board) + exp_correction
     } else {
         0
