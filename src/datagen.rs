@@ -78,7 +78,7 @@ pub fn unpack_board(packed: &[u8; 32], side: Color, castling: u8, ep_file: u8) -
     board.hash = board.compute_hash();
     board
 }
-fn write_entry(buf: &mut Vec<u8>, board: &Board, score_white: i16, result: i8) {
+fn write_entry(buf: &mut Vec<u8>, board: &Board, score_white: i16, wdl: u8) {
     let packed = pack_board(board);
     buf.extend_from_slice(&packed);
     buf.push(board.side as u8);
@@ -86,7 +86,7 @@ fn write_entry(buf: &mut Vec<u8>, board: &Board, score_white: i16, result: i8) {
     buf.push(board.ep_square.map_or(255, |sq| file_of(sq)));
     buf.push(0);
     buf.extend_from_slice(&score_white.to_le_bytes());
-    buf.push(result as u8);
+    buf.push(wdl);
     buf.push(0);
     debug_assert_eq!(buf.len() % ENTRY_SIZE, 0);
 }
@@ -149,7 +149,7 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
                 break;
             }
         }
-        let mut result: i8 = 0;
+        let mut wdl: u8 = 1;
         let mut win_adj = 0u32;
         let mut draw_adj = 0u32;
 
@@ -169,10 +169,7 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
 
             if !has_legal {
                 if board.in_check() {
-                    result = match board.side {
-                        Color::White => -1,
-                        Color::Black => 1,
-                    };
+                    wdl = if board.side == Color::White { 0 } else { 2 };
                 }
                 break;
             }
@@ -183,14 +180,14 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
             let search_result = search::search(&mut board, &mut tt, &exp, 0, depth);
             let score = search_result.score;
             if score.abs() > eval::MATE_THRESHOLD {
-                result = if (score > 0) == (board.side == Color::White) { 1 } else { -1 };
+                wdl = if (score > 0) == (board.side == Color::White) { 2 } else { 0 };
                 break;
             }
             if score.abs() > 1000 {
                 win_adj += 1;
                 draw_adj = 0;
                 if win_adj >= 3 {
-                    result = if (score > 0) == (board.side == Color::White) { 1 } else { -1 };
+                    wdl = if (score > 0) == (board.side == Color::White) { 2 } else { 0 };
                     break;
                 }
             } else if score.abs() < 10 {
@@ -218,7 +215,7 @@ pub fn generate(num_games: u32, depth: i32, output_path: &str, random_plies: u32
             ply += 1;
         }
         for (pos, score) in &positions {
-            write_entry(&mut buf, pos, *score, result);
+            write_entry(&mut buf, pos, *score, wdl);
             total_positions += 1;
         }
 
