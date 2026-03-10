@@ -429,4 +429,22 @@ mod tests {
         }
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn test_load_lichess_samples() {
+        setup();
+        let path = "lichess_test_data.bin";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("Skipping: {} not found", path);
+            return;
+        }
+        let samples = load_samples(path);
+        assert!(!samples.is_empty(), "No samples loaded");
+        for (i, s) in samples.iter().enumerate() {
+            assert!(!s.white_features.is_empty(), "sample {}: empty white features", i);
+            assert!(!s.black_features.is_empty(), "sample {}: empty black features", i);
+            assert!(s.piece_count > 0, "sample {}: zero pieces", i);
+        }
+        eprintln!("Loaded {} training samples from {}", samples.len(), path);
+    }
 }

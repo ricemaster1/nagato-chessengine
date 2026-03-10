@@ -320,4 +320,39 @@ mod tests {
                 "Mismatch at square {}", SQUARE_NAMES[sq as usize]);
         }
     }
+
+    #[test]
+    fn test_read_lichess_pipeline_output() {
+        setup();
+        let path = "lichess_test_data.bin";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("Skipping: {} not found (run pipeline.py first)", path);
+            return;
+        }
+        let data = std::fs::read(path).unwrap();
+        assert_eq!(data.len() % ENTRY_SIZE, 0, "File size not multiple of {}", ENTRY_SIZE);
+        let n = data.len() / ENTRY_SIZE;
+        assert!(n > 0, "Empty file");
+        for i in 0..n {
+            let off = i * ENTRY_SIZE;
+            let entry = &data[off..off + ENTRY_SIZE];
+            let packed: [u8; 32] = entry[0..32].try_into().unwrap();
+            let side_byte = entry[32];
+            let castling = entry[33];
+            let ep_file = entry[34];
+            let score = i16::from_le_bytes([entry[36], entry[37]]);
+            let wdl = entry[38];
+
+            assert!(side_byte <= 1, "entry {}: bad side {}", i, side_byte);
+            assert!(wdl <= 2, "entry {}: bad wdl {}", i, wdl);
+            assert!(score.abs() <= 30000, "entry {}: score {} out of range", i, score);
+
+            let side = if side_byte == 0 { Color::White } else { Color::Black };
+            let board = unpack_board(&packed, side, castling, ep_file);
+            // Verify board has exactly 1 king per side
+            assert_ne!(board.king_sq(Color::White), 64, "entry {}: no white king", i);
+            assert_ne!(board.king_sq(Color::Black), 64, "entry {}: no black king", i);
+        }
+        eprintln!("Verified {} entries from {}", n, path);
+    }
 }
