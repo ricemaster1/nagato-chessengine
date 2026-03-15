@@ -16,21 +16,24 @@ Thumbs.db
 cutechess/
 assets/
 games/
-training/
 testing/
 src/bin
 .venv/
 *.sln
-*ipynb*
-test*
 
 # Local directories
-data/
-scripts/
+/data/
+/scripts/
 
-# NNUE weights & training data
+# NNUE weights & training data (temp/generated — ignore by default)
 *.bin
+!nn.bin
+!training/data/*.bin
 *_log.txt
+
+# Temporary test artifacts
+nn_test.bin
+nn_validate.bin
 
 # Tablebase files and pgn (too large for git)
 *.rtbw
@@ -38,7 +41,8 @@ scripts/
 *.rtbm
 *.pgn
 
-# Experience data (generated at runtime)
+# Experience data
 *.exp
+!nagato.exp
 
 sync-to-ubuntu.sh
