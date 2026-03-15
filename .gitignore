@@ -20,6 +20,9 @@ training/
 testing/
 src/bin
 .venv/
+*.sln
+*ipynb*
+test*
 
 # Local directories
 data/
