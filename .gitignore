@@ -5,6 +5,8 @@ target/
 .vscode/
 .idea/
 .ipynb_checkpoints/
+__pycache__/
+*.pyc
 *.swp
 *.swo
 *~
