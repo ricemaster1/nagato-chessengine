@@ -28,6 +28,8 @@ import os
 import sys
 from pathlib import Path
 
+import nnue_lab_common as c
+
 # ────────────────────────── Configuration ──────────────────────────
 
 GAMES_DIR = Path("games")
@@ -196,12 +198,12 @@ def sample_positions(game, n=POSITIONS_PER_GAME, skip_plies=SKIP_PLIES):
 
 def run_pipeline(output_path, max_games=None, progress_interval=100):
     """Main pipeline: filter → sample → eval → write."""
-    zst_files = sorted(GAMES_DIR.glob("*.pgn.zst"))
-    if not zst_files:
-        print("No .pgn.zst files found in games/")
+    game_files = c.iter_game_source_files()
+    if not game_files:
+        print("No .pgn or .pgn.zst files found in games/")
         return
 
-    print(f"Found {len(zst_files)} ZST file(s)")
+    print(f"Found {len(game_files)} PGN source file(s)")
     print(f"Stockfish: {STOCKFISH_PATH}, depth={SF_DEPTH}, threads={SF_THREADS}")
     print(f"Filter: Elo≥{MIN_ELO}, TC≥{MIN_TIME_BASE}s, Normal termination")
     print(f"Output: {output_path}")
@@ -216,15 +218,11 @@ def run_pipeline(output_path, max_games=None, progress_interval=100):
     file_idx = 0
 
     with open(output_path, "wb") as out:
-        for zst_path in zst_files:
+        for game_path in game_files:
             file_idx += 1
-            print(f"\n[File {file_idx}/{len(zst_files)}] {zst_path.name}")
+            print(f"\n[File {file_idx}/{len(game_files)}] {game_path.relative_to(Path.cwd())}")
 
-            dctx = zstandard.ZstdDecompressor()
-            with open(zst_path, "rb") as fh:
-                reader = dctx.stream_reader(fh)
-                text_stream = io.TextIOWrapper(reader, encoding="utf-8", errors="replace")
-
+            with c.open_pgn_text(game_path) as text_stream:
                 while True:
                     if max_games is not None and games_passed >= max_games:
                         break

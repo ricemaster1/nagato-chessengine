@@ -22,6 +22,8 @@ import multiprocessing as mp
 from pathlib import Path
 from queue import Empty
 
+import nnue_lab_common as c
+
 # ────────────────────────── Configuration ──────────────────────────
 
 GAMES_DIR = Path("games")
@@ -179,15 +181,15 @@ def eval_worker(task_queue, result_queue, worker_id):
 # ────────────────────────── Main ──────────────────────────
 
 def run_parallel_pipeline(output_path, max_games=None, progress_interval=500):
-    zst_files = sorted(GAMES_DIR.glob("*.pgn.zst"))
-    if not zst_files:
-        print("No .pgn.zst files found in games/")
+    game_files = c.iter_game_source_files()
+    if not game_files:
+        print("No .pgn or .pgn.zst files found in games/")
         return
 
     print(f"Pipeline: {NUM_WORKERS} workers × {SF_THREADS_PER_WORKER} SF threads, "
           f"depth={SF_DEPTH}")
     print(f"Filter: Elo≥{MIN_ELO}, TC≥{MIN_TIME_BASE}s, Normal termination")
-    print(f"Files: {len(zst_files)}, Output: {output_path}")
+    print(f"Files: {len(game_files)}, Output: {output_path}")
 
     task_queue = mp.Queue(maxsize=NUM_WORKERS * 4)
     result_queue = mp.Queue()
@@ -216,13 +218,9 @@ def run_parallel_pipeline(output_path, max_games=None, progress_interval=500):
 
     # Producer: read games, filter, sample, send to workers
     with open(output_path, "wb") as out:
-        for zst_path in zst_files:
-            print(f"\n  Reading {zst_path.name}...")
-            dctx = zstandard.ZstdDecompressor()
-            with open(zst_path, "rb") as fh:
-                reader = dctx.stream_reader(fh)
-                text_stream = io.TextIOWrapper(reader, encoding="utf-8", errors="replace")
-
+        for game_path in game_files:
+            print(f"\n  Reading {game_path.relative_to(Path.cwd())}...")
+            with c.open_pgn_text(game_path) as text_stream:
                 while True:
                     if max_games is not None and games_passed >= max_games:
                         break

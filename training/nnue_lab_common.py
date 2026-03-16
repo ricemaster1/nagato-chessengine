@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import io
 import struct
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator, TextIO
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import zstandard
 
 KING_BUCKETS = 10
 PIECES_EX_KING = 5
@@ -47,6 +50,47 @@ def data_dir() -> Path:
     return training_dir() / "data"
 
 
+def games_dir() -> Path:
+    return training_dir().parent / "games"
+
+
+def elite_archive_dir() -> Path:
+    return games_dir() / "Lichess Elite Database"
+
+
+def iter_game_source_files() -> list[Path]:
+    roots = [games_dir().glob("*.pgn.zst"), elite_archive_dir().glob("*.pgn")]
+    files = [path for group in roots for path in group]
+    return sorted(files)
+
+
+def list_game_sources() -> pd.DataFrame:
+    rows = []
+    for path in iter_game_source_files():
+        rows.append({
+            "file": path.name,
+            "relative_path": str(path.relative_to(training_dir().parent)),
+            "format": "pgn.zst" if path.suffix == ".zst" else "pgn",
+            "source": "elite-archive" if path.parent == elite_archive_dir() else "games-root",
+            "size_mb": round(path.stat().st_size / (1024 * 1024), 2),
+        })
+    return pd.DataFrame(rows)
+
+
+@contextmanager
+def open_pgn_text(path: Path) -> Iterator[TextIO]:
+    if path.suffix == ".zst":
+        dctx = zstandard.ZstdDecompressor()
+        with path.open("rb") as fh:
+            with dctx.stream_reader(fh) as reader:
+                with io.TextIOWrapper(reader, encoding="utf-8", errors="replace") as text_stream:
+                    yield text_stream
+        return
+
+    with path.open("r", encoding="utf-8", errors="replace") as text_stream:
+        yield text_stream
+
+
 def list_training_bins() -> pd.DataFrame:
     rows = []
     for path in sorted(data_dir().glob("*.bin")):
@@ -56,6 +100,116 @@ def list_training_bins() -> pd.DataFrame:
             "size_mb": round(size / (1024 * 1024), 2),
             "entries": size // ENTRY_SIZE,
         })
+    return pd.DataFrame(rows)
+
+
+def list_elite_pgns() -> pd.DataFrame:
+    rows = []
+    for path in sorted(elite_archive_dir().glob("*.pgn")):
+        size = path.stat().st_size
+        rows.append({
+            "file": path.name,
+            "month": path.stem.replace("lichess_elite_", ""),
+            "size_mb": round(size / (1024 * 1024), 2),
+        })
+    return pd.DataFrame(rows)
+
+
+def parse_time_control(value: str | None) -> tuple[int | None, int | None]:
+    if not value or value in {"-", "?"}:
+        return None, None
+    if "+" not in value:
+        return None, None
+    base_str, inc_str = value.split("+", 1)
+    try:
+        return int(base_str), int(inc_str)
+    except ValueError:
+        return None, None
+
+
+def classify_time_control(base_seconds: int | None) -> str:
+    if base_seconds is None:
+        return "unknown"
+    if base_seconds < 180:
+        return "bullet"
+    if base_seconds < 600:
+        return "blitz"
+    if base_seconds < 1800:
+        return "rapid"
+    return "classical"
+
+
+def _maybe_int(value: str | None) -> int | None:
+    if not value or value in {"?", ""}:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _iter_pgn_headers(path: Path, max_games: int | None = None) -> Iterable[dict[str, str]]:
+    headers: dict[str, str] = {}
+    games = 0
+    in_header = False
+
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+
+            if line.startswith("[") and line.endswith("]"):
+                in_header = True
+                key, _, remainder = line[1:-1].partition(" ")
+                value = remainder.strip().strip('"')
+                headers[key] = value
+                continue
+
+            if in_header and line == "":
+                if headers:
+                    yield headers
+                    games += 1
+                    if max_games is not None and games >= max_games:
+                        return
+                headers = {}
+                in_header = False
+
+    if headers and (max_games is None or games < max_games):
+        yield headers
+
+
+def sample_elite_headers(max_files: int | None = None, max_games_per_file: int = 250) -> pd.DataFrame:
+    rows = []
+    files = sorted(elite_archive_dir().glob("*.pgn"))
+    if max_files is not None:
+        files = files[:max_files]
+
+    for path in files:
+        month = path.stem.replace("lichess_elite_", "")
+        for headers in _iter_pgn_headers(path, max_games=max_games_per_file):
+            white_elo = _maybe_int(headers.get("WhiteElo"))
+            black_elo = _maybe_int(headers.get("BlackElo"))
+            avg_elo = None
+            if white_elo is not None and black_elo is not None:
+                avg_elo = (white_elo + black_elo) / 2.0
+
+            base_seconds, increment = parse_time_control(headers.get("TimeControl"))
+            rows.append({
+                "file": path.name,
+                "month": month,
+                "event": headers.get("Event", "?"),
+                "result": headers.get("Result", "?"),
+                "termination": headers.get("Termination", "?"),
+                "opening": headers.get("Opening", "Unknown"),
+                "eco": headers.get("ECO", "?"),
+                "white_elo": white_elo,
+                "black_elo": black_elo,
+                "avg_elo": avg_elo,
+                "time_control": headers.get("TimeControl", "?"),
+                "base_seconds": base_seconds,
+                "increment": increment,
+                "tc_class": classify_time_control(base_seconds),
+            })
+
     return pd.DataFrame(rows)
 
 
