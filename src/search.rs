@@ -2,7 +2,7 @@
 use crate::bitboard::*;
 use crate::board::Board;
 use crate::eval::{self, INFINITY, MATE_SCORE};
-use crate::learn::{ExpEntry, ExpTable};
+use crate::learn::ExpTable;
 use crate::movegen;
 use crate::moves::*;
 use std::time::Instant;
@@ -365,6 +365,11 @@ fn alpha_beta(
 
     let is_pv = beta - alpha > 1;
 
+    if depth >= 4 && tt_move.is_null() && !in_check && !is_pv {
+        // Internal iterative reduction when we have no strong TT guidance.
+        depth -= 1;
+    }
+
     let exp_correction = if let Some(exp_entry) = exp.probe(board.hash) {
         if tt_move.is_null() && !exp_entry.best_move.is_null() {
             tt_move = exp_entry.best_move;
@@ -443,6 +448,13 @@ fn alpha_beta(
         pick_move(&mut list, &mut scores, i);
         let m = list.moves[i];
 
+        let quiet_move = !m.is_capture() && !m.is_promotion() && !m.is_en_passant();
+
+        let mover = board.side.index();
+        let from_sq = m.from_sq() as usize;
+        let to_sq = m.to_sq() as usize;
+        let alpha_before_move = alpha;
+
         if !board.make_move(m) {
             continue;
         }
@@ -502,6 +514,10 @@ fn alpha_beta(
         board.unmake_move(m);
         moves_searched += 1;
 
+        if quiet_move && score <= alpha_before_move {
+            info.history[mover][from_sq][to_sq] = (info.history[mover][from_sq][to_sq] - depth * depth).clamp(-32_000, 32_000);
+        }
+
         if info.stopped {
             return 0;
         }
@@ -515,7 +531,9 @@ fn alpha_beta(
                 flag = TTFlag::Exact;
 
                 if !m.is_capture() {
-                    info.history[board.side.index()][m.from_sq() as usize][m.to_sq() as usize] += depth * depth;
+                    info.history[board.side.index()][m.from_sq() as usize][m.to_sq() as usize] =
+                        (info.history[board.side.index()][m.from_sq() as usize][m.to_sq() as usize] + depth * depth)
+                            .clamp(-32_000, 32_000);
                 }
 
                 if score >= beta {
