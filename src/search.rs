@@ -8,6 +8,13 @@ use crate::moves::*;
 use std::time::Instant;
 
 const TT_BUCKET_SIZE: usize = 4;
+const LMP_DEPTH_MAX: i32 = 1;
+const LMP_BASE: usize = 6;
+const LMP_STEP: usize = 2;
+const FUTILITY_DEPTH_MAX: i32 = 2;
+const FUTILITY_MARGIN_BASE: i32 = 140;
+const FUTILITY_MARGIN_STEP: i32 = 60;
+const FUTILITY_IMPROVING_BONUS: i32 = 20;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TTFlag {
@@ -449,6 +456,27 @@ fn alpha_beta(
         let m = list.moves[i];
 
         let quiet_move = !m.is_capture() && !m.is_promotion() && !m.is_en_passant();
+        let is_killer = ply < 128 && (m.0 == info.killers[ply][0].0 || m.0 == info.killers[ply][1].0);
+        let protected_quiet = !quiet_move || m.0 == tt_move.0 || is_killer;
+
+        if !in_check && !is_pv && !protected_quiet {
+            if depth <= LMP_DEPTH_MAX {
+                let lmp_limit = LMP_BASE + LMP_STEP * (depth as usize);
+                if moves_searched >= lmp_limit {
+                    continue;
+                }
+            }
+
+            if depth <= FUTILITY_DEPTH_MAX && moves_searched > 0 {
+                let mut futility_margin = FUTILITY_MARGIN_BASE + FUTILITY_MARGIN_STEP * depth;
+                if improving {
+                    futility_margin -= FUTILITY_IMPROVING_BONUS;
+                }
+                if static_eval + futility_margin <= alpha {
+                    continue;
+                }
+            }
+        }
 
         let mover = board.side.index();
         let from_sq = m.from_sq() as usize;
