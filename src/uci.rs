@@ -16,7 +16,14 @@ const ENGINE_AUTHOR: &str = "Nagato Team";
 pub fn uci_loop() {
     let stdin = io::stdin();
     let mut board = Board::start_pos();
-    let mut tt = TranspositionTable::new(64);
+    let mut hash_mb = 64usize;
+    let mut tt = TranspositionTable::new(hash_mb);
+
+    let max_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 256);
+    let mut threads = 1usize;
 
     let mut exp_path = PathBuf::from("nagato.exp");
     let mut exp_table = ExpTable::new();
@@ -49,6 +56,7 @@ pub fn uci_loop() {
                 println!("id name {}", ENGINE_NAME);
                 println!("id author {}", ENGINE_AUTHOR);
                 println!("option name Hash type spin default 64 min 1 max 4096");
+                println!("option name Threads type spin default 1 min 1 max {}", max_threads);
                 println!("option name ExperienceFile type string default nagato.exp");
                 println!("option name Experience type check default true");
                 println!("uciok");
@@ -76,7 +84,11 @@ pub fn uci_loop() {
                     recorder.set_our_color(board.side.index() as u8);
                 }
                 let exp_ref = if use_experience { &exp_table } else { &ExpTable::new() };
-                let result = search::search(&mut board, &mut tt, exp_ref, time_ms, depth);
+                let result = if threads <= 1 {
+                    search::search(&mut board, &mut tt, exp_ref, time_ms, depth)
+                } else {
+                    search::search_threads(&board, exp_ref, time_ms, depth, threads, hash_mb)
+                };
                 if use_experience {
                     recorder.record(
                         board.hash,
@@ -191,7 +203,16 @@ pub fn uci_loop() {
                 }
             }
             "setoption" => {
-                parse_setoption(&tokens, &mut tt, &mut exp_path, &mut exp_table, &mut use_experience);
+                parse_setoption(
+                    &tokens,
+                    &mut tt,
+                    &mut hash_mb,
+                    &mut threads,
+                    max_threads,
+                    &mut exp_path,
+                    &mut exp_table,
+                    &mut use_experience,
+                );
             }
             _ => {
             }
@@ -199,7 +220,16 @@ pub fn uci_loop() {
     }
 }
 
-fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable, exp_path: &mut PathBuf, exp_table: &mut ExpTable, use_experience: &mut bool) {
+fn parse_setoption(
+    tokens: &[&str],
+    tt: &mut TranspositionTable,
+    hash_mb: &mut usize,
+    threads: &mut usize,
+    max_threads: usize,
+    exp_path: &mut PathBuf,
+    exp_table: &mut ExpTable,
+    use_experience: &mut bool,
+) {
     let mut name = String::new();
     let mut value = String::new();
     let mut reading_name = false;
@@ -225,7 +255,13 @@ fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable, exp_path: &mut 
     match name_lower.as_str() {
         "hash" => {
             if let Ok(mb) = value.parse::<usize>() {
-                *tt = TranspositionTable::new(mb.clamp(1, 4096));
+                *hash_mb = mb.clamp(1, 4096);
+                *tt = TranspositionTable::new(*hash_mb);
+            }
+        }
+        "threads" => {
+            if let Ok(n) = value.parse::<usize>() {
+                *threads = n.clamp(1, max_threads);
             }
         }
         "experiencefile" => {

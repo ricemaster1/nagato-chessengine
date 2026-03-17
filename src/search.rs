@@ -5,6 +5,7 @@ use crate::eval::{self, INFINITY, MATE_SCORE};
 use crate::learn::ExpTable;
 use crate::movegen;
 use crate::moves::*;
+use std::thread;
 use std::time::Instant;
 
 const TT_BUCKET_SIZE: usize = 4;
@@ -652,6 +653,176 @@ pub struct SearchResult {
     pub depth: i32,
     pub nodes: u64,
     pub time_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+struct WorkerResult {
+    best_move: Move,
+    score: i32,
+    nodes: u64,
+}
+
+pub fn search_threads(
+    board: &Board,
+    exp: &ExpTable,
+    time_limit_ms: u64,
+    max_depth: i32,
+    threads: usize,
+    hash_mb: usize,
+) -> SearchResult {
+    let start_time = Instant::now();
+    let mut root = board.clone();
+    let mut root_list = MoveList::new();
+    movegen::generate_moves(&root, &mut root_list);
+    let root_moves: Vec<Move> = (0..root_list.len())
+        .map(|i| root_list.moves[i])
+        .filter(|m| {
+            if root.make_move(*m) {
+                root.unmake_move(*m);
+                true
+            } else {
+                false
+            }
+        })
+        .collect();
+
+    if root_moves.is_empty() {
+        return SearchResult {
+            best_move: MOVE_NONE,
+            score: 0,
+            depth: 0,
+            nodes: 0,
+            time_ms: 0,
+        };
+    }
+
+    let worker_count = threads.clamp(1, root_moves.len());
+    let per_thread_hash = (hash_mb / worker_count).max(8);
+
+    let mut global_best_move = root_moves[0];
+    let mut global_best_score = -INFINITY;
+    let mut global_nodes = 0u64;
+    let mut reached_depth = 0;
+
+    for depth in 1..=max_depth {
+        let worker_results: Vec<WorkerResult> = thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(worker_count);
+            let root_moves_ref = &root_moves;
+            for worker_id in 0..worker_count {
+                handles.push(scope.spawn(move || {
+                    let mut local_board = board.clone();
+                    let mut local_tt = TranspositionTable::new(per_thread_hash);
+                    local_tt.new_generation();
+
+                    let mut best_move = MOVE_NONE;
+                    let mut best_score = -INFINITY;
+                    let mut nodes = 0u64;
+
+                    for (i, m) in root_moves_ref.iter().enumerate() {
+                        if i % worker_count != worker_id {
+                            continue;
+                        }
+
+                        if time_limit_ms > 0 && start_time.elapsed().as_millis() as u64 >= time_limit_ms {
+                            break;
+                        }
+
+                        if !local_board.make_move(*m) {
+                            continue;
+                        }
+
+                        let mut info = SearchInfo::new();
+                        info.start_time = start_time;
+                        info.time_limit_ms = time_limit_ms;
+                        info.max_depth = depth;
+
+                        let score = -alpha_beta(
+                            &mut local_board,
+                            &mut local_tt,
+                            &mut info,
+                            exp,
+                            depth - 1,
+                            -INFINITY,
+                            INFINITY,
+                            1,
+                            true,
+                            *m,
+                        );
+                        local_board.unmake_move(*m);
+
+                        nodes = nodes.saturating_add(info.nodes);
+                        if info.stopped {
+                            break;
+                        }
+
+                        if score > best_score {
+                            best_score = score;
+                            best_move = *m;
+                        }
+                    }
+
+                    WorkerResult {
+                        best_move,
+                        score: best_score,
+                        nodes,
+                    }
+                }));
+            }
+
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        let mut depth_nodes = 0u64;
+        let mut depth_best_move = global_best_move;
+        let mut depth_best_score = -INFINITY;
+        for wr in worker_results {
+            depth_nodes = depth_nodes.saturating_add(wr.nodes);
+            if !wr.best_move.is_null() && wr.score > depth_best_score {
+                depth_best_score = wr.score;
+                depth_best_move = wr.best_move;
+            }
+        }
+
+        if depth_best_score > -INFINITY {
+            global_best_move = depth_best_move;
+            global_best_score = depth_best_score;
+            reached_depth = depth;
+        }
+
+        global_nodes = global_nodes.saturating_add(depth_nodes);
+        let elapsed = start_time.elapsed().as_millis() as u64;
+        let nps = if elapsed > 0 { global_nodes * 1000 / elapsed } else { 0 };
+        let score_str = if eval::is_mate_score(global_best_score) {
+            format!("score mate {}", eval::mate_in(global_best_score))
+        } else {
+            format!("score cp {}", global_best_score)
+        };
+
+        println!(
+            "info depth {} {} nodes {} time {} nps {} pv {}",
+            depth,
+            score_str,
+            global_nodes,
+            elapsed,
+            nps,
+            global_best_move.to_uci(),
+        );
+
+        if eval::is_mate_score(global_best_score) {
+            break;
+        }
+        if time_limit_ms > 0 && elapsed > time_limit_ms / 2 {
+            break;
+        }
+    }
+
+    SearchResult {
+        best_move: global_best_move,
+        score: global_best_score,
+        depth: reached_depth,
+        nodes: global_nodes,
+        time_ms: start_time.elapsed().as_millis() as u64,
+    }
 }
 
 pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, time_limit_ms: u64, max_depth: i32) -> SearchResult {
