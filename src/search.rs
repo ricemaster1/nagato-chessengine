@@ -15,6 +15,9 @@ const FUTILITY_DEPTH_MAX: i32 = 2;
 const FUTILITY_MARGIN_BASE: i32 = 140;
 const FUTILITY_MARGIN_STEP: i32 = 60;
 const FUTILITY_IMPROVING_BONUS: i32 = 20;
+const PROBCUT_MIN_DEPTH: i32 = 5;
+const PROBCUT_MARGIN: i32 = 180;
+const PROBCUT_REDUCTION: i32 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TTFlag {
@@ -438,6 +441,56 @@ fn alpha_beta(
         let margin = if improving { 100 * depth } else { 120 * depth };
         if static_eval - margin >= beta {
             return static_eval - margin;
+        }
+    }
+
+    if !in_check
+        && !is_pv
+        && depth >= PROBCUT_MIN_DEPTH
+        && beta < MATE_SCORE - 512
+    {
+        let prob_beta = beta + PROBCUT_MARGIN;
+        if static_eval >= prob_beta - 120 {
+            let mut prob_list = MoveList::new();
+            movegen::generate_captures(board, &mut prob_list);
+            let mut prob_scores: Vec<i32> = (0..prob_list.len())
+                .map(|i| eval::mvv_lva_score(prob_list.moves[i]))
+                .collect();
+
+            for i in 0..prob_list.len() {
+                pick_move(&mut prob_list, &mut prob_scores, i);
+                let m = prob_list.moves[i];
+
+                if eval::see(board, m) < 0 {
+                    continue;
+                }
+                if !board.make_move(m) {
+                    continue;
+                }
+
+                let reduced_depth = (depth - 1 - PROBCUT_REDUCTION).max(1);
+                let score = -alpha_beta(
+                    board,
+                    tt,
+                    info,
+                    exp,
+                    reduced_depth,
+                    -prob_beta,
+                    -prob_beta + 1,
+                    ply + 1,
+                    false,
+                    m,
+                );
+
+                board.unmake_move(m);
+
+                if info.stopped {
+                    return 0;
+                }
+                if score >= prob_beta {
+                    return score;
+                }
+            }
         }
     }
 
