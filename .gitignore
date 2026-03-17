@@ -22,11 +22,8 @@ games/
 testing/
 src/bin
 .venv/
-*.sln
-
-# Local directories
-/data/
-/scripts/
+*.
+*.json
 
 # NNUE weights & training data (temp/generated — ignore by default)
 *.bin
@@ -44,8 +41,14 @@ nn_validate.bin
 *.rtbm
 *.pgn
 
+# Elo reference run artifacts (generated locally)
+training/elo_reference_latest.json
+training/elo_reference_history.jsonl
+training/elo_reference_last.pgn
+
 # Experience data
 *.exp
 !nagato.exp
 
 sync-to-ubuntu.sh
+scripts/
