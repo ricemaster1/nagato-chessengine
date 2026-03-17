@@ -51,3 +51,4 @@ training/elo_reference_last.pgn
 !nagato.exp
 
 sync-to-ubuntu.sh
+scripts/
