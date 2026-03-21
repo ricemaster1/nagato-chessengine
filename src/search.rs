@@ -5,6 +5,7 @@ use crate::eval::{self, INFINITY, MATE_SCORE};
 use crate::learn::ExpTable;
 use crate::movegen;
 use crate::moves::*;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Instant;
 
@@ -705,9 +706,13 @@ pub fn search_threads(
     let mut reached_depth = 0;
 
     for depth in 1..=max_depth {
+        let next_job = AtomicUsize::new(0);
+        let shared_stop = AtomicBool::new(false);
         let worker_results: Vec<WorkerResult> = thread::scope(|scope| {
             let mut handles = Vec::with_capacity(worker_count);
             let root_moves_ref = &root_moves;
+            let next_job_ref = &next_job;
+            let shared_stop_ref = &shared_stop;
             for worker_id in 0..worker_count {
                 handles.push(scope.spawn(move || {
                     let mut local_board = board.clone();
@@ -718,16 +723,24 @@ pub fn search_threads(
                     let mut best_score = -INFINITY;
                     let mut nodes = 0u64;
 
-                    for (i, m) in root_moves_ref.iter().enumerate() {
-                        if i % worker_count != worker_id {
-                            continue;
-                        }
-
-                        if time_limit_ms > 0 && start_time.elapsed().as_millis() as u64 >= time_limit_ms {
+                    let _ = worker_id;
+                    loop {
+                        if shared_stop_ref.load(Ordering::Relaxed) {
                             break;
                         }
 
-                        if !local_board.make_move(*m) {
+                        if time_limit_ms > 0 && start_time.elapsed().as_millis() as u64 >= time_limit_ms {
+                            shared_stop_ref.store(true, Ordering::Relaxed);
+                            break;
+                        }
+
+                        let i = next_job_ref.fetch_add(1, Ordering::Relaxed);
+                        if i >= root_moves_ref.len() {
+                            break;
+                        }
+                        let m = root_moves_ref[i];
+
+                        if !local_board.make_move(m) {
                             continue;
                         }
 
@@ -746,18 +759,22 @@ pub fn search_threads(
                             INFINITY,
                             1,
                             true,
-                            *m,
+                            m,
                         );
-                        local_board.unmake_move(*m);
+                        local_board.unmake_move(m);
 
                         nodes = nodes.saturating_add(info.nodes);
                         if info.stopped {
+                            shared_stop_ref.store(true, Ordering::Relaxed);
                             break;
                         }
 
                         if score > best_score {
                             best_score = score;
-                            best_move = *m;
+                            best_move = m;
+                            if eval::is_mate_score(score) {
+                                shared_stop_ref.store(true, Ordering::Relaxed);
+                            }
                         }
                     }
 
