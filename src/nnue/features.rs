@@ -1,34 +1,27 @@
 use crate::bitboard::*;
+#[cfg(test)]
 use super::INPUT_SIZE;
 
 pub const KING_BUCKETS: usize = 10;
+
+// Mapper indexed by [rank][mirrored_file], where mirrored_file maps A/H->0, B/G->1, C/F->2, D/E->3.
+pub const KING_BUCKET_MAPPER: [[usize; 4]; 8] = [
+    [3, 3, 3, 3],
+    [4, 1, 1, 1],
+    [7, 1, 0, 0],
+    [9, 1, 0, 0],
+    [9, 1, 0, 0],
+    [7, 1, 1, 1],
+    [5, 1, 1, 1],
+    [6, 6, 6, 6],
+];
 
 #[inline]
 pub fn king_bucket_of(sq: u8) -> usize {
     let file = sq & 7;
     let rank = sq >> 3;
     let file_m = if file >= 4 { 7 - file } else { file };
-    if file_m >= 2 && file_m <= 3 && rank >= 2 && rank <= 4 {
-        0
-    } else if file_m >= 1 && file_m <= 4 && rank >= 1 && rank <= 6 {
-        1
-    } else if file_m >= 3 && rank >= 2 && rank <= 5 {
-        2
-    } else if rank == 0 {
-        3
-    } else if rank == 1 {
-        4
-    } else if rank == 6 {
-        5
-    } else if rank == 7 {
-        6
-    } else if file_m <= 1 && (rank <= 2 || rank >= 5) {
-        7
-    } else if file_m >= 4 || rank <= 0 || rank >= 7 {
-        8
-    } else {
-        9
-    }
+    KING_BUCKET_MAPPER[rank as usize][file_m as usize]
 }
 
 pub const PIECES_EX_KING: usize = 5;
@@ -137,6 +130,18 @@ mod tests {
         assert_eq!(king_bucket_of(sq::E8), 6);
         let b = king_bucket_of(sq::A7);
         assert!(b < KING_BUCKETS);
+    }
+
+    #[test]
+    fn test_king_bucket_mapper_layout() {
+        assert_eq!(KING_BUCKET_MAPPER[0], [3, 3, 3, 3]);
+        assert_eq!(KING_BUCKET_MAPPER[1], [4, 1, 1, 1]);
+        assert_eq!(KING_BUCKET_MAPPER[2], [7, 1, 0, 0]);
+        assert_eq!(KING_BUCKET_MAPPER[3], [9, 1, 0, 0]);
+        assert_eq!(KING_BUCKET_MAPPER[4], [9, 1, 0, 0]);
+        assert_eq!(KING_BUCKET_MAPPER[5], [7, 1, 1, 1]);
+        assert_eq!(KING_BUCKET_MAPPER[6], [5, 1, 1, 1]);
+        assert_eq!(KING_BUCKET_MAPPER[7], [6, 6, 6, 6]);
     }
 
     #[test]
