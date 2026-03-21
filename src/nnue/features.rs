@@ -1,4 +1,5 @@
 use crate::bitboard::*;
+use crate::board::Board;
 #[cfg(test)]
 use super::INPUT_SIZE;
 
@@ -57,6 +58,38 @@ pub fn feature_index_halfkp_black(piece: Piece, color: Color, sq: u8, king_sq: u
     let piece_no_king = piece_index_no_king(piece).expect("King has no HalfKP feature");
     let color_offset = match color { Color::Black => 0, Color::White => PER_COLOR_BUCKET };
     bucket * PER_BUCKET_FEATURES + color_offset + piece_no_king * 64 + flipped as usize
+}
+
+pub struct HalfKpFeatures {
+    pub white: Vec<usize>,
+    pub black: Vec<usize>,
+}
+
+pub fn transform_halfkp(board: &Board) -> HalfKpFeatures {
+    let wk = board.king_sq(Color::White);
+    let bk = board.king_sq(Color::Black);
+
+    let mut white = Vec::with_capacity(32);
+    let mut black = Vec::with_capacity(32);
+
+    for color_idx in 0..2 {
+        let color = if color_idx == 0 { Color::White } else { Color::Black };
+        for piece_idx in 0..PIECE_COUNT {
+            let piece = Piece::from_index(piece_idx);
+            if piece_index_no_king(piece).is_none() {
+                continue;
+            }
+
+            let mut bb = board.pieces[color.index()][piece_idx];
+            while bb != 0 {
+                let sq = pop_lsb(&mut bb);
+                white.push(feature_index_halfkp_white(piece, color, sq, wk));
+                black.push(feature_index_halfkp_black(piece, color, sq, bk));
+            }
+        }
+    }
+
+    HalfKpFeatures { white, black }
 }
 
 #[inline]
@@ -196,6 +229,14 @@ mod tests {
         let idx_a = feature_index_halfkp_white(Piece::Pawn, Color::White, sq::E2, sq::E1);
         let idx_b = feature_index_halfkp_white(Piece::Pawn, Color::White, sq::E2, sq::E4);
         assert_ne!(idx_a, idx_b);
+    }
+
+    #[test]
+    fn test_transform_halfkp_startpos_size() {
+        let board = Board::start_pos();
+        let transformed = transform_halfkp(&board);
+        assert_eq!(transformed.white.len(), 30);
+        assert_eq!(transformed.black.len(), 30);
     }
 
     #[test]
