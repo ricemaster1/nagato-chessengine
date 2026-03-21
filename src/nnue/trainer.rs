@@ -2,8 +2,7 @@ use super::{L1_SIZE, L1_PAIR, L2_SIZE, L2_INPUT, NUM_PSQT_BUCKETS, NUM_LAYER_STA
 use super::network::psqt_bucket;
 use crate::bitboard::*;
 use crate::datagen::{unpack_board, ENTRY_SIZE};
-use super::features::{feature_index_halfkp_white, feature_index_halfkp_black,
-                       piece_index_no_king, KING_BUCKETS, PER_BUCKET_FEATURES};
+use super::features::{transform_halfkp, KING_BUCKETS, PER_BUCKET_FEATURES};
 
 pub const FT_SIZE: usize = KING_BUCKETS * PER_BUCKET_FEATURES;
 
@@ -27,27 +26,10 @@ pub fn parse_entry(data: &[u8]) -> Option<TrainingSample> {
     let wdl_byte = data[38];
 
     let board = unpack_board(&packed, side, castling, ep_file);
-    let wk = board.king_sq(Color::White);
-    let bk = board.king_sq(Color::Black);
-
-    let mut white_feats = Vec::with_capacity(32);
-    let mut black_feats = Vec::with_capacity(32);
-    let mut piece_count = 0u32;
-
-    for color_idx in 0..2 {
-        let c = if color_idx == 0 { Color::White } else { Color::Black };
-        for piece_idx in 0..PIECE_COUNT {
-            let piece = Piece::from_index(piece_idx);
-            if piece_index_no_king(piece).is_none() { continue; }
-            let mut bb = board.pieces[c.index()][piece_idx];
-            while bb != 0 {
-                let sq = pop_lsb(&mut bb);
-                white_feats.push(feature_index_halfkp_white(piece, c, sq, wk));
-                black_feats.push(feature_index_halfkp_black(piece, c, sq, bk));
-                piece_count += 1;
-            }
-        }
-    }
+    let transformed = transform_halfkp(&board);
+    let white_feats = transformed.white;
+    let black_feats = transformed.black;
+    let piece_count = white_feats.len() as u32;
 
     let wdl = match wdl_byte { 2 => 1.0, 1 => 0.5, _ => 0.0 };
     let score = score_raw as f32;

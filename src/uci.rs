@@ -83,6 +83,23 @@ pub fn uci_loop() {
                 if use_experience {
                     recorder.set_our_color(board.side.index() as u8);
                 }
+                if let Some(tb_uci) = crate::syzygy::probe_bestmove_uci(&board, depth) {
+                    if let Some(tb_move) = parse_uci_move(&board, &tb_uci) {
+                        println!("info string syzygy bestmove {}", tb_uci);
+                        if use_experience {
+                            recorder.record(
+                                board.hash,
+                                tb_move,
+                                depth as i8,
+                                0,
+                                board.side.index() as u8,
+                            );
+                        }
+                        println!("bestmove {}", tb_move);
+                        continue;
+                    }
+                }
+
                 let exp_ref = if use_experience { &exp_table } else { &ExpTable::new() };
                 let _ = threads;
                 let _ = hash_mb;

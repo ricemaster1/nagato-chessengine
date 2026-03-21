@@ -1,8 +1,10 @@
 use crate::bitboard::Color;
 use crate::board::Board;
-use crate::nnue::features::{KING_BUCKETS, PER_BUCKET_FEATURES};
+use crate::nnue::features::{KING_BUCKETS, PER_BUCKET_FEATURES, king_bucket_of};
 
-use super::{L1_SIZE, L1_PAIR, L2_INPUT, L2_SIZE, INPUT_SIZE, NUM_PSQT_BUCKETS, NUM_LAYER_STACKS, SKIP_SIZE, QA, QB};
+use super::{L1_SIZE, L1_PAIR, L2_INPUT, L2_SIZE, NUM_PSQT_BUCKETS, NUM_LAYER_STACKS, SKIP_SIZE, QA, QB};
+#[cfg(test)]
+use super::INPUT_SIZE;
 use super::accumulator::{Accumulator, AccumulatorQ};
 use super::simd;
 
@@ -157,7 +159,8 @@ pub fn load_weights_from_file(path: &std::path::Path) -> Result<NnueWeights, Str
 }
 
 pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
-    let mut cursor = 0usize;
+    let mut cursor = 4usize;
+    let mut v2_header_bytes = 0usize;
 
     let read_u32 = |cursor: &mut usize, data: &[u8]| -> Result<u32, String> {
         if *cursor + 4 > data.len() {
@@ -183,11 +186,32 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
     if &data[0..4] != b"NAGT" {
         return Err("bad magic".into());
     }
-    cursor = 4;
 
     let version = read_u32(&mut cursor, data)?;
     if version != 1 && version != 2 && version != 3 {
         return Err(format!("unsupported version: {}", version));
+    }
+
+    // Optional v2 header for explicit architecture metadata.
+    // Legacy v2 files without this header remain supported.
+    if version == 2 && cursor + 20 <= data.len() && &data[cursor..cursor + 4] == b"V2H0" {
+        cursor += 4;
+        v2_header_bytes = 20;
+        let hdr_l1_rows = read_u32(&mut cursor, data)? as usize;
+        let hdr_l1_size = read_u32(&mut cursor, data)? as usize;
+        let hdr_l2_size = read_u32(&mut cursor, data)? as usize;
+        let hdr_psqt_buckets = read_u32(&mut cursor, data)? as usize;
+        let expected_l1_rows = KING_BUCKETS * PER_BUCKET_FEATURES;
+        if hdr_l1_rows != expected_l1_rows
+            || hdr_l1_size != L1_SIZE
+            || hdr_l2_size != L2_SIZE
+            || hdr_psqt_buckets != NUM_PSQT_BUCKETS
+        {
+            return Err(format!(
+                "v2 header mismatch: rows={} l1={} l2={} psqt={}",
+                hdr_l1_rows, hdr_l1_size, hdr_l2_size, hdr_psqt_buckets
+            ));
+        }
     }
 
     let l1_rows = if version == 1 {
@@ -253,7 +277,7 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
 
     let fc_floats_per_stack = concat_size * L2_SIZE + L2_SIZE + L2_SIZE + 1;
     let skip_floats = if version >= 3 { SKIP_SIZE } else { 0 };
-    let expected = 4 + 4
+    let expected = 4 + 4 + v2_header_bytes
         + (l1_rows * L1_SIZE) * 4
         + L1_SIZE * 4
         + (l1_rows * NUM_PSQT_BUCKETS) * 4
@@ -290,13 +314,15 @@ pub fn psqt_bucket(piece_count: u32) -> usize {
     ((count - 1) / 8).min(NUM_PSQT_BUCKETS - 1)
 }
 
-pub fn forward(acc: &Accumulator, side: Color, psqt: i32, piece_count: u32) -> i32 {
+pub fn forward(acc: &Accumulator, side: Color, king_sq_white: u8, king_sq_black: u8, psqt: i32, piece_count: u32) -> i32 {
     let w = weights();
     let bucket = psqt_bucket(piece_count);
+    let wb = king_bucket_of(king_sq_white);
+    let bb = king_bucket_of(king_sq_black);
 
     let (stm_acc, opp_acc) = match side {
-        Color::White => (&acc.white, &acc.black),
-        Color::Black => (&acc.black, &acc.white),
+        Color::White => (&acc.white[wb], &acc.black[bb]),
+        Color::Black => (&acc.black[bb], &acc.white[wb]),
     };
 
     let mut l2_out = w.l2_biases[bucket];
@@ -345,16 +371,18 @@ pub fn evaluate(board: &Board, acc: &Accumulator) -> i32 {
         Color::Black => (acc.psqt_black[bucket], acc.psqt_white[bucket]),
     };
     let psqt = ((stm_psqt - opp_psqt) * 400.0) as i32;
-    forward(acc, board.side, psqt, board.piece_count())
+    forward(acc, board.side, board.king_sq(Color::White), board.king_sq(Color::Black), psqt, board.piece_count())
 }
 
-pub fn forward_q(acc: &AccumulatorQ, side: Color, psqt: i32, piece_count: u32) -> i32 {
+pub fn forward_q(acc: &AccumulatorQ, side: Color, king_sq_white: u8, king_sq_black: u8, psqt: i32, piece_count: u32) -> i32 {
     let wq = weights_q();
     let bucket = psqt_bucket(piece_count);
+    let wb = king_bucket_of(king_sq_white);
+    let bb = king_bucket_of(king_sq_black);
 
     let (stm_acc, opp_acc) = match side {
-        Color::White => (&acc.white, &acc.black),
-        Color::Black => (&acc.black, &acc.white),
+        Color::White => (&acc.white[wb], &acc.black[bb]),
+        Color::Black => (&acc.black[bb], &acc.white[wb]),
     };
 
     let mut l2_out = [0i32; L2_SIZE];
@@ -379,7 +407,7 @@ pub fn evaluate_q(board: &Board, acc: &AccumulatorQ) -> i32 {
         Color::Black => (acc.psqt_black[bucket], acc.psqt_white[bucket]),
     };
     let psqt = (stm_psqt - opp_psqt) * 400 / (QA * QA);
-    forward_q(acc, board.side, psqt, board.piece_count())
+    forward_q(acc, board.side, board.king_sq(Color::White), board.king_sq(Color::Black), psqt, board.piece_count())
 }
 
 pub fn leb128_encode_i32(val: i32, buf: &mut Vec<u8>) {
@@ -544,6 +572,27 @@ mod tests {
     }
 
     #[test]
+    fn test_load_v2_with_header_roundtrip() {
+        let l1_rows = KING_BUCKETS * PER_BUCKET_FEATURES;
+        let total_floats = l1_rows * L1_SIZE + L1_SIZE + l1_rows * NUM_PSQT_BUCKETS + L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1;
+        let mut buf: Vec<u8> = Vec::with_capacity(8 + 20 + total_floats * 4);
+        buf.extend_from_slice(b"NAGT");
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        buf.extend_from_slice(b"V2H0");
+        buf.extend_from_slice(&(l1_rows as u32).to_le_bytes());
+        buf.extend_from_slice(&(L1_SIZE as u32).to_le_bytes());
+        buf.extend_from_slice(&(L2_SIZE as u32).to_le_bytes());
+        buf.extend_from_slice(&(NUM_PSQT_BUCKETS as u32).to_le_bytes());
+        for i in 0..total_floats {
+            buf.extend_from_slice(&(i as f32 * 0.0001).to_le_bytes());
+        }
+        let w = load_weights_from_bytes(&buf).expect("v2 header load failed");
+        assert_eq!(w.version, 2);
+        assert_eq!(w.l1_weights.len(), l1_rows);
+        assert_eq!(w.l2_weights[0].len(), L2_INPUT);
+    }
+
+    #[test]
     fn test_load_v3_roundtrip() {
         let l1_rows = KING_BUCKETS * PER_BUCKET_FEATURES;
         let ft_floats = l1_rows * L1_SIZE + L1_SIZE + l1_rows * NUM_PSQT_BUCKETS;
@@ -642,17 +691,22 @@ mod tests {
         NNUE_LOADED.store(true, Ordering::Relaxed);
 
         let mut acc_f = Accumulator::new();
-        acc_f.white = [0.5; L1_SIZE];
-        acc_f.black = [0.3; L1_SIZE];
-
-        let mut acc_q = AccumulatorQ::new();
-        for j in 0..L1_SIZE {
-            acc_q.white[j] = (0.5 * QA as f32).round() as i16;
-            acc_q.black[j] = (0.3 * QA as f32).round() as i16;
+        for bucket in 0..KING_BUCKETS {
+            acc_f.white[bucket] = [0.5; L1_SIZE];
+            acc_f.black[bucket] = [0.3; L1_SIZE];
         }
 
-        let f32_result = forward(&acc_f, Color::White, 0, 32);
-        let q_result = forward_q(&acc_q, Color::White, 0, 32);
+        let mut acc_q = AccumulatorQ::new();
+        for bucket in 0..KING_BUCKETS {
+            for j in 0..L1_SIZE {
+                acc_q.white[bucket][j] = (0.5 * QA as f32).round() as i16;
+                acc_q.black[bucket][j] = (0.3 * QA as f32).round() as i16;
+            }
+        }
+
+        let sq_bucket0 = 18u8; // C3 maps to bucket 0
+        let f32_result = forward(&acc_f, Color::White, sq_bucket0, sq_bucket0, 0, 32);
+        let q_result = forward_q(&acc_q, Color::White, sq_bucket0, sq_bucket0, 0, 32);
 
         let diff = (f32_result - q_result).abs();
         assert!(diff <= 100, "f32={} q={} diff={} (uniform 0.01 weights have high quant error)", f32_result, q_result, diff);
@@ -669,7 +723,8 @@ mod tests {
         NNUE_LOADED.store(true, Ordering::Relaxed);
 
         let acc_q = AccumulatorQ::new();
-        let result = forward_q(&acc_q, Color::White, 0, 32);
+        let sq_bucket0 = 18u8; // C3 maps to bucket 0
+        let result = forward_q(&acc_q, Color::White, sq_bucket0, sq_bucket0, 0, 32);
         assert_eq!(result, 0);
 
         NNUE_LOADED.store(false, Ordering::Relaxed);
@@ -699,11 +754,12 @@ mod tests {
 
         let mut acc_q = AccumulatorQ::new();
         for j in 0..L1_SIZE {
-            acc_q.white[j] = 200;
-            acc_q.black[j] = 100;
+            acc_q.white[0][j] = 200;
+            acc_q.black[0][j] = 100;
         }
 
-        let result = forward_q(&acc_q, Color::White, 0, 32);
+        let sq_bucket0 = 18u8; // C3 maps to bucket 0
+        let result = forward_q(&acc_q, Color::White, sq_bucket0, sq_bucket0, 0, 32);
         let stm_pw: i32 = (200u16 as u32 * 200u16 as u32 >> 8) as i32;
         let opp_pw: i32 = (100u16 as u32 * 100u16 as u32 >> 8) as i32;
         let l2_dot = L1_PAIR as i32 * stm_pw * 1 + L1_PAIR as i32 * opp_pw * 1;
@@ -725,14 +781,17 @@ mod tests {
         NNUE_LOADED.store(true, Ordering::Relaxed);
 
         let mut acc = Accumulator::new();
-        acc.white = [0.5; L1_SIZE];
-        acc.black = [0.3; L1_SIZE];
+        for bucket in 0..KING_BUCKETS {
+            acc.white[bucket] = [0.5; L1_SIZE];
+            acc.black[bucket] = [0.3; L1_SIZE];
+        }
 
+        let sq_bucket0 = 18u8; // C3 maps to bucket 0
         let iterations = 1_000_000;
         let start = Instant::now();
         let mut sum = 0i64;
         for _ in 0..iterations {
-            sum += forward(&acc, Color::White, 0, 32) as i64;
+            sum += forward(&acc, Color::White, sq_bucket0, sq_bucket0, 0, 32) as i64;
         }
         let elapsed = start.elapsed();
         let ns_per = elapsed.as_nanos() as f64 / iterations as f64;
@@ -779,15 +838,16 @@ mod tests {
 
         let mut acc_q = AccumulatorQ::new();
         for j in 0..L1_SIZE {
-            acc_q.white[j] = (0.5 * QA as f32).round() as i16;
-            acc_q.black[j] = (0.3 * QA as f32).round() as i16;
+            acc_q.white[0][j] = (0.5 * QA as f32).round() as i16;
+            acc_q.black[0][j] = (0.3 * QA as f32).round() as i16;
         }
 
+        let sq_bucket0 = 18u8; // C3 maps to bucket 0
         let iterations = 1_000_000;
         let start = Instant::now();
         let mut sum = 0i64;
         for _ in 0..iterations {
-            sum += forward_q(&acc_q, Color::White, 0, 32) as i64;
+            sum += forward_q(&acc_q, Color::White, sq_bucket0, sq_bucket0, 0, 32) as i64;
         }
         let elapsed = start.elapsed();
         let ns_per = elapsed.as_nanos() as f64 / iterations as f64;

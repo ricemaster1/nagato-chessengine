@@ -1,6 +1,6 @@
 use crate::board::Board;
 use crate::eval::MATE_SCORE;
-use shakmaty::{fen::Fen, CastlingMode, Chess};
+use shakmaty::{fen::Fen, uci::UciMove, CastlingMode, Chess, Move};
 use shakmaty_syzygy::{Tablebase, Wdl};
 use std::sync::{Mutex, OnceLock};
 
@@ -64,6 +64,31 @@ fn with_tablebase<R>(path: &str, f: impl FnOnce(&Tablebase<Chess>) -> R) -> Opti
     cache.tables.as_ref().map(f)
 }
 
+fn to_shakmaty_position(board: &Board) -> Option<Chess> {
+    let fen = board.to_fen();
+    fen.parse::<Fen>().ok()?.into_position(CastlingMode::Standard).ok()
+}
+
+fn move_to_uci(mv: Move) -> String {
+    UciMove::from_standard(mv).to_string()
+}
+
+pub fn probe_bestmove_uci(board: &Board, depth: i32) -> Option<String> {
+    let (path, probe_depth) = get_config_snapshot()?;
+    if path.is_empty() || depth < probe_depth {
+        return None;
+    }
+
+    if board.all_occupancy.count_ones() > 7 {
+        return None;
+    }
+
+    let pos = to_shakmaty_position(board)?;
+    let best = with_tablebase(&path, |tables| tables.best_move(&pos).ok())??;
+    let (mv, _dtz) = best?;
+    Some(move_to_uci(mv))
+}
+
 pub fn probe_wdl_score(board: &Board, depth: i32, ply: usize) -> Option<i32> {
     let (path, probe_depth) = get_config_snapshot()?;
     if path.is_empty() || depth < probe_depth {
@@ -74,12 +99,7 @@ pub fn probe_wdl_score(board: &Board, depth: i32, ply: usize) -> Option<i32> {
         return None;
     }
 
-    let fen = board.to_fen();
-    let pos: Chess = fen
-        .parse::<Fen>()
-        .ok()?
-        .into_position(CastlingMode::Standard)
-        .ok()?;
+    let pos = to_shakmaty_position(board)?;
 
     let wdl = with_tablebase(&path, |tables| tables.probe_wdl_after_zeroing(&pos).ok())??;
 

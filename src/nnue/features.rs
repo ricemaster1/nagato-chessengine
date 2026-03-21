@@ -1,34 +1,28 @@
 use crate::bitboard::*;
+use crate::board::Board;
+#[cfg(test)]
 use super::INPUT_SIZE;
 
 pub const KING_BUCKETS: usize = 10;
+
+// Mapper indexed by [rank][mirrored_file], where mirrored_file maps A/H->0, B/G->1, C/F->2, D/E->3.
+pub const KING_BUCKET_MAPPER: [[usize; 4]; 8] = [
+    [3, 3, 3, 3],
+    [4, 1, 1, 1],
+    [7, 1, 0, 0],
+    [9, 1, 0, 0],
+    [9, 1, 0, 0],
+    [7, 1, 1, 1],
+    [5, 1, 1, 1],
+    [6, 6, 6, 6],
+];
 
 #[inline]
 pub fn king_bucket_of(sq: u8) -> usize {
     let file = sq & 7;
     let rank = sq >> 3;
     let file_m = if file >= 4 { 7 - file } else { file };
-    if file_m >= 2 && file_m <= 3 && rank >= 2 && rank <= 4 {
-        0
-    } else if file_m >= 1 && file_m <= 4 && rank >= 1 && rank <= 6 {
-        1
-    } else if file_m >= 3 && rank >= 2 && rank <= 5 {
-        2
-    } else if rank == 0 {
-        3
-    } else if rank == 1 {
-        4
-    } else if rank == 6 {
-        5
-    } else if rank == 7 {
-        6
-    } else if file_m <= 1 && (rank <= 2 || rank >= 5) {
-        7
-    } else if file_m >= 4 || rank <= 0 || rank >= 7 {
-        8
-    } else {
-        9
-    }
+    KING_BUCKET_MAPPER[rank as usize][file_m as usize]
 }
 
 pub const PIECES_EX_KING: usize = 5;
@@ -64,6 +58,38 @@ pub fn feature_index_halfkp_black(piece: Piece, color: Color, sq: u8, king_sq: u
     let piece_no_king = piece_index_no_king(piece).expect("King has no HalfKP feature");
     let color_offset = match color { Color::Black => 0, Color::White => PER_COLOR_BUCKET };
     bucket * PER_BUCKET_FEATURES + color_offset + piece_no_king * 64 + flipped as usize
+}
+
+pub struct HalfKpFeatures {
+    pub white: Vec<usize>,
+    pub black: Vec<usize>,
+}
+
+pub fn transform_halfkp(board: &Board) -> HalfKpFeatures {
+    let wk = board.king_sq(Color::White);
+    let bk = board.king_sq(Color::Black);
+
+    let mut white = Vec::with_capacity(32);
+    let mut black = Vec::with_capacity(32);
+
+    for color_idx in 0..2 {
+        let color = if color_idx == 0 { Color::White } else { Color::Black };
+        for piece_idx in 0..PIECE_COUNT {
+            let piece = Piece::from_index(piece_idx);
+            if piece_index_no_king(piece).is_none() {
+                continue;
+            }
+
+            let mut bb = board.pieces[color.index()][piece_idx];
+            while bb != 0 {
+                let sq = pop_lsb(&mut bb);
+                white.push(feature_index_halfkp_white(piece, color, sq, wk));
+                black.push(feature_index_halfkp_black(piece, color, sq, bk));
+            }
+        }
+    }
+
+    HalfKpFeatures { white, black }
 }
 
 #[inline]
@@ -140,6 +166,18 @@ mod tests {
     }
 
     #[test]
+    fn test_king_bucket_mapper_layout() {
+        assert_eq!(KING_BUCKET_MAPPER[0], [3, 3, 3, 3]);
+        assert_eq!(KING_BUCKET_MAPPER[1], [4, 1, 1, 1]);
+        assert_eq!(KING_BUCKET_MAPPER[2], [7, 1, 0, 0]);
+        assert_eq!(KING_BUCKET_MAPPER[3], [9, 1, 0, 0]);
+        assert_eq!(KING_BUCKET_MAPPER[4], [9, 1, 0, 0]);
+        assert_eq!(KING_BUCKET_MAPPER[5], [7, 1, 1, 1]);
+        assert_eq!(KING_BUCKET_MAPPER[6], [5, 1, 1, 1]);
+        assert_eq!(KING_BUCKET_MAPPER[7], [6, 6, 6, 6]);
+    }
+
+    #[test]
     fn test_king_bucket_all_squares_in_range() {
         for sq in 0..64u8 {
             let b = king_bucket_of(sq);
@@ -191,6 +229,14 @@ mod tests {
         let idx_a = feature_index_halfkp_white(Piece::Pawn, Color::White, sq::E2, sq::E1);
         let idx_b = feature_index_halfkp_white(Piece::Pawn, Color::White, sq::E2, sq::E4);
         assert_ne!(idx_a, idx_b);
+    }
+
+    #[test]
+    fn test_transform_halfkp_startpos_size() {
+        let board = Board::start_pos();
+        let transformed = transform_halfkp(&board);
+        assert_eq!(transformed.white.len(), 30);
+        assert_eq!(transformed.black.len(), 30);
     }
 
     #[test]
