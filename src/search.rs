@@ -661,6 +661,8 @@ struct WorkerResult {
     best_move: Move,
     score: i32,
     nodes: u64,
+    jobs_done: usize,
+    timed_out: bool,
 }
 
 pub fn search_threads(
@@ -722,6 +724,8 @@ pub fn search_threads(
                     let mut best_move = MOVE_NONE;
                     let mut best_score = -INFINITY;
                     let mut nodes = 0u64;
+                    let mut jobs_done = 0usize;
+                    let mut timed_out = false;
 
                     let _ = worker_id;
                     loop {
@@ -731,6 +735,7 @@ pub fn search_threads(
 
                         if time_limit_ms > 0 && start_time.elapsed().as_millis() as u64 >= time_limit_ms {
                             shared_stop_ref.store(true, Ordering::Relaxed);
+                            timed_out = true;
                             break;
                         }
 
@@ -764,8 +769,10 @@ pub fn search_threads(
                         local_board.unmake_move(m);
 
                         nodes = nodes.saturating_add(info.nodes);
+                        jobs_done += 1;
                         if info.stopped {
                             shared_stop_ref.store(true, Ordering::Relaxed);
+                            timed_out = true;
                             break;
                         }
 
@@ -782,6 +789,8 @@ pub fn search_threads(
                         best_move,
                         score: best_score,
                         nodes,
+                        jobs_done,
+                        timed_out,
                     }
                 }));
             }
@@ -790,17 +799,23 @@ pub fn search_threads(
         });
 
         let mut depth_nodes = 0u64;
+        let mut depth_jobs_done = 0usize;
+        let mut depth_timed_out = false;
         let mut depth_best_move = global_best_move;
         let mut depth_best_score = -INFINITY;
         for wr in worker_results {
             depth_nodes = depth_nodes.saturating_add(wr.nodes);
+            depth_jobs_done = depth_jobs_done.saturating_add(wr.jobs_done);
+            depth_timed_out |= wr.timed_out;
             if !wr.best_move.is_null() && wr.score > depth_best_score {
                 depth_best_score = wr.score;
                 depth_best_move = wr.best_move;
             }
         }
 
-        if depth_best_score > -INFINITY {
+        let depth_complete = depth_jobs_done >= root_moves.len() || eval::is_mate_score(depth_best_score);
+
+        if depth_complete && depth_best_score > -INFINITY {
             global_best_move = depth_best_move;
             global_best_score = depth_best_score;
             reached_depth = depth;
@@ -826,6 +841,9 @@ pub fn search_threads(
         );
 
         if eval::is_mate_score(global_best_score) {
+            break;
+        }
+        if depth_timed_out && !depth_complete {
             break;
         }
         if time_limit_ms > 0 && elapsed > time_limit_ms / 2 {
