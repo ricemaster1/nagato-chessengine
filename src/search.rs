@@ -5,7 +5,7 @@ use crate::eval::{self, INFINITY, MATE_SCORE};
 use crate::learn::ExpTable;
 use crate::movegen;
 use crate::moves::*;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Instant;
 
@@ -660,9 +660,8 @@ pub struct SearchResult {
 struct WorkerResult {
     best_move: Move,
     score: i32,
+    depth: i32,
     nodes: u64,
-    jobs_done: usize,
-    timed_out: bool,
 }
 
 pub fn search_threads(
@@ -699,164 +698,194 @@ pub fn search_threads(
         };
     }
 
-    let worker_count = threads.clamp(1, root_moves.len());
+    let worker_count = threads.max(1);
     let per_thread_hash = (hash_mb / worker_count).max(8);
+    let shared_stop = AtomicBool::new(false);
+    let worker_results: Vec<WorkerResult> = thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        let root_moves_ref = &root_moves;
+        let shared_stop_ref = &shared_stop;
 
-    let mut global_best_move = root_moves[0];
-    let mut global_best_score = -INFINITY;
-    let mut global_nodes = 0u64;
-    let mut reached_depth = 0;
+        for worker_id in 0..worker_count {
+            handles.push(scope.spawn(move || {
+                let mut local_board = board.clone();
+                let mut local_tt = TranspositionTable::new(per_thread_hash);
+                local_tt.new_generation();
 
-    for depth in 1..=max_depth {
-        let next_job = AtomicUsize::new(0);
-        let shared_stop = AtomicBool::new(false);
-        let worker_results: Vec<WorkerResult> = thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(worker_count);
-            let root_moves_ref = &root_moves;
-            let next_job_ref = &next_job;
-            let shared_stop_ref = &shared_stop;
-            for worker_id in 0..worker_count {
-                handles.push(scope.spawn(move || {
-                    let mut local_board = board.clone();
-                    let mut local_tt = TranspositionTable::new(per_thread_hash);
-                    local_tt.new_generation();
+                let mut root_order = root_moves_ref.clone();
+                if !root_order.is_empty() {
+                    let n = root_order.len();
+                    root_order.rotate_left(worker_id % n);
+                }
 
-                    let mut best_move = MOVE_NONE;
-                    let mut best_score = -INFINITY;
-                    let mut nodes = 0u64;
-                    let mut jobs_done = 0usize;
-                    let mut timed_out = false;
+                let mut total_nodes = 0u64;
+                let mut worker_best_move = root_order[0];
+                let mut worker_best_score = -INFINITY;
+                let mut worker_reached_depth = 0;
+                let mut info = SearchInfo::new();
+                info.start_time = start_time;
+                info.time_limit_ms = time_limit_ms;
+                info.max_depth = max_depth;
 
-                    let _ = worker_id;
-                    loop {
+                for depth in 1..=max_depth {
+                    if shared_stop_ref.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    info.reset();
+                    info.start_time = start_time;
+                    info.time_limit_ms = time_limit_ms;
+                    info.max_depth = depth;
+
+                    let (mut alpha, mut beta) = if depth >= 4 {
+                        (worker_best_score - 25, worker_best_score + 25)
+                    } else {
+                        (-INFINITY, INFINITY)
+                    };
+
+                    let mut depth_best_move = MOVE_NONE;
+                    let mut depth_best_score = -INFINITY;
+
+                    for &m in &root_order {
                         if shared_stop_ref.load(Ordering::Relaxed) {
                             break;
                         }
-
-                        if time_limit_ms > 0 && start_time.elapsed().as_millis() as u64 >= time_limit_ms {
-                            shared_stop_ref.store(true, Ordering::Relaxed);
-                            timed_out = true;
-                            break;
-                        }
-
-                        let i = next_job_ref.fetch_add(1, Ordering::Relaxed);
-                        if i >= root_moves_ref.len() {
-                            break;
-                        }
-                        let m = root_moves_ref[i];
 
                         if !local_board.make_move(m) {
                             continue;
                         }
 
-                        let mut info = SearchInfo::new();
-                        info.start_time = start_time;
-                        info.time_limit_ms = time_limit_ms;
-                        info.max_depth = depth;
+                        let mut score;
+                        loop {
+                            score = -alpha_beta(
+                                &mut local_board,
+                                &mut local_tt,
+                                &mut info,
+                                exp,
+                                depth - 1,
+                                alpha,
+                                beta,
+                                1,
+                                true,
+                                m,
+                            );
 
-                        let score = -alpha_beta(
-                            &mut local_board,
-                            &mut local_tt,
-                            &mut info,
-                            exp,
-                            depth - 1,
-                            -INFINITY,
-                            INFINITY,
-                            1,
-                            true,
-                            m,
-                        );
+                            if info.stopped {
+                                break;
+                            }
+
+                            if score <= alpha {
+                                alpha = -INFINITY;
+                            } else if score >= beta {
+                                beta = INFINITY;
+                            } else {
+                                break;
+                            }
+                        }
+
                         local_board.unmake_move(m);
 
-                        nodes = nodes.saturating_add(info.nodes);
-                        jobs_done += 1;
                         if info.stopped {
                             shared_stop_ref.store(true, Ordering::Relaxed);
-                            timed_out = true;
                             break;
                         }
 
-                        if score > best_score {
-                            best_score = score;
-                            best_move = m;
+                        if score > depth_best_score {
+                            depth_best_score = score;
+                            depth_best_move = m;
                             if eval::is_mate_score(score) {
                                 shared_stop_ref.store(true, Ordering::Relaxed);
                             }
                         }
                     }
 
-                    WorkerResult {
-                        best_move,
-                        score: best_score,
-                        nodes,
-                        jobs_done,
-                        timed_out,
+                    total_nodes = total_nodes.saturating_add(info.nodes);
+
+                    if info.stopped {
+                        break;
                     }
-                }));
-            }
 
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
-        });
+                    if !depth_best_move.is_null() {
+                        worker_best_move = depth_best_move;
+                        worker_best_score = depth_best_score;
+                        worker_reached_depth = depth;
+                    }
 
-        let mut depth_nodes = 0u64;
-        let mut depth_jobs_done = 0usize;
-        let mut depth_timed_out = false;
-        let mut depth_best_move = global_best_move;
-        let mut depth_best_score = -INFINITY;
-        for wr in worker_results {
-            depth_nodes = depth_nodes.saturating_add(wr.nodes);
-            depth_jobs_done = depth_jobs_done.saturating_add(wr.jobs_done);
-            depth_timed_out |= wr.timed_out;
-            if !wr.best_move.is_null() && wr.score > depth_best_score {
-                depth_best_score = wr.score;
-                depth_best_move = wr.best_move;
-            }
+                    let elapsed = start_time.elapsed().as_millis() as u64;
+                    if time_limit_ms > 0 && elapsed > time_limit_ms / 2 {
+                        shared_stop_ref.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+
+                WorkerResult {
+                    best_move: worker_best_move,
+                    score: worker_best_score,
+                    depth: worker_reached_depth,
+                    nodes: total_nodes,
+                }
+            }));
         }
 
-        let depth_complete = depth_jobs_done >= root_moves.len() || eval::is_mate_score(depth_best_score);
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
 
-        if depth_complete && depth_best_score > -INFINITY {
-            global_best_move = depth_best_move;
-            global_best_score = depth_best_score;
-            reached_depth = depth;
-        }
+    let mut best = WorkerResult {
+        best_move: root_moves[0],
+        score: -INFINITY,
+        depth: 0,
+        nodes: 0,
+    };
+    let mut global_nodes = 0u64;
 
-        global_nodes = global_nodes.saturating_add(depth_nodes);
-        let elapsed = start_time.elapsed().as_millis() as u64;
-        let nps = if elapsed > 0 { global_nodes * 1000 / elapsed } else { 0 };
-        let score_str = if eval::is_mate_score(global_best_score) {
-            format!("score mate {}", eval::mate_in(global_best_score))
+    for wr in worker_results {
+        global_nodes = global_nodes.saturating_add(wr.nodes);
+
+        let best_is_win = eval::is_mate_score(best.score) && best.score > 0;
+        let wr_is_win = eval::is_mate_score(wr.score) && wr.score > 0;
+        let best_is_loss = eval::is_mate_score(best.score) && best.score < 0;
+        let wr_is_loss = eval::is_mate_score(wr.score) && wr.score < 0;
+
+        let choose_wr = if best_is_win {
+            wr_is_win && wr.score > best.score
+        } else if best_is_loss {
+            wr_is_loss && wr.score < best.score
+        } else if wr_is_win {
+            true
+        } else if wr_is_loss {
+            false
         } else {
-            format!("score cp {}", global_best_score)
+            wr.score > best.score || (wr.score == best.score && wr.depth > best.depth)
         };
 
-        println!(
-            "info depth {} {} nodes {} time {} nps {} pv {}",
-            depth,
-            score_str,
-            global_nodes,
-            elapsed,
-            nps,
-            global_best_move.to_uci(),
-        );
-
-        if eval::is_mate_score(global_best_score) {
-            break;
-        }
-        if depth_timed_out && !depth_complete {
-            break;
-        }
-        if time_limit_ms > 0 && elapsed > time_limit_ms / 2 {
-            break;
+        if choose_wr {
+            best = wr;
         }
     }
 
+    let elapsed = start_time.elapsed().as_millis() as u64;
+    let nps = if elapsed > 0 { global_nodes * 1000 / elapsed } else { 0 };
+    let score_str = if eval::is_mate_score(best.score) {
+        format!("score mate {}", eval::mate_in(best.score))
+    } else {
+        format!("score cp {}", best.score)
+    };
+    println!(
+        "info depth {} {} nodes {} time {} nps {} pv {}",
+        best.depth,
+        score_str,
+        global_nodes,
+        elapsed,
+        nps,
+        best.best_move.to_uci(),
+    );
+
     SearchResult {
-        best_move: global_best_move,
-        score: global_best_score,
-        depth: reached_depth,
+        best_move: best.best_move,
+        score: best.score,
+        depth: best.depth,
         nodes: global_nodes,
-        time_ms: start_time.elapsed().as_millis() as u64,
+        time_ms: elapsed,
     }
 }
 
