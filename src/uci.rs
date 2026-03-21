@@ -19,10 +19,8 @@ pub fn uci_loop() {
     let mut hash_mb = 64usize;
     let mut tt = TranspositionTable::new(hash_mb);
 
-    let max_threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .clamp(1, 256);
+    // Temporary stabilization: keep engine behavior single-threaded.
+    let max_threads = 1usize;
     let mut threads = 1usize;
 
     let mut exp_path = PathBuf::from("nagato.exp");
@@ -84,11 +82,9 @@ pub fn uci_loop() {
                     recorder.set_our_color(board.side.index() as u8);
                 }
                 let exp_ref = if use_experience { &exp_table } else { &ExpTable::new() };
-                let result = if threads <= 1 {
-                    search::search(&mut board, &mut tt, exp_ref, time_ms, depth)
-                } else {
-                    search::search_threads(&board, exp_ref, time_ms, depth, threads, hash_mb)
-                };
+                let _ = threads;
+                let _ = hash_mb;
+                let result = search::search(&mut board, &mut tt, exp_ref, time_ms, depth);
                 if use_experience {
                     recorder.record(
                         board.hash,
@@ -260,9 +256,12 @@ fn parse_setoption(
             }
         }
         "threads" => {
-            if let Ok(n) = value.parse::<usize>() {
-                *threads = n.clamp(1, max_threads);
+            let requested = value.parse::<usize>().ok().unwrap_or(1);
+            if requested != 1 {
+                eprintln!("info string Threads is temporarily locked to 1 for stability");
             }
+            let _ = max_threads;
+            *threads = 1;
         }
         "experiencefile" => {
             if !value.is_empty() {
