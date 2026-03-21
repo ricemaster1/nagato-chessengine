@@ -8,6 +8,7 @@ pub const WQ_CASTLE: u8 = 0b0010;
 pub const BK_CASTLE: u8 = 0b0100; 
 pub const BQ_CASTLE: u8 = 0b1000; 
 pub const ALL_CASTLES: u8 = 0b1111;
+pub const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 #[derive(Clone, Copy)]
 pub struct UndoInfo {
@@ -44,8 +45,6 @@ pub struct Board {
     pub acc_dirty_num: u8,
     pub finny_cache: nnue::FinnyCache,
 }
-
-pub const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 impl Board {
     pub fn empty() -> Self {
@@ -203,7 +202,7 @@ impl Board {
 
         fen
     }
-
+    
     pub fn put_piece(&mut self, piece: Piece, color: Color, sq: u8) {
         let bb = square_bb(sq);
         self.pieces[color.index()][piece.index()] |= bb;
@@ -294,59 +293,61 @@ impl Board {
         if self.acc_computed { return; }
         let wk = self.king_sq(Color::White);
         let bk = self.king_sq(Color::Black);
+        let wk_bucket = nnue::king_bucket_of(wk);
+        let bk_bucket = nnue::king_bucket_of(bk ^ 56);
         let needs_refresh = self.acc_refresh_white || self.acc_refresh_black;
         if needs_refresh {
             if self.acc_refresh_white {
                 let bucket = nnue::king_bucket_of(wk);
                 if self.finny_cache.white[bucket].valid {
-                    self.accumulator_q.white = self.finny_cache.white[bucket].half;
+                        self.accumulator_q.white[bucket] = self.finny_cache.white[bucket].half;
                     self.accumulator_q.psqt_white = self.finny_cache.white[bucket].psqt;
                     let cached_pieces = self.finny_cache.white[bucket].pieces;
                     nnue::finny_update_half(
-                        &mut self.accumulator_q.white, &mut self.accumulator_q.psqt_white,
+                            &mut self.accumulator_q.white[bucket], &mut self.accumulator_q.psqt_white,
                         &cached_pieces, &self.pieces, wk, Color::White,
                     );
                 } else {
                     nnue::refresh_half_q(
                         &self.pieces, wk,
-                        &mut self.accumulator_q.white, &mut self.accumulator_q.psqt_white,
+                            &mut self.accumulator_q.white[bucket], &mut self.accumulator_q.psqt_white,
                         Color::White,
                     );
                 }
-                self.finny_cache.white[bucket].half = self.accumulator_q.white;
+                    self.finny_cache.white[bucket].half = self.accumulator_q.white[bucket];
                 self.finny_cache.white[bucket].psqt = self.accumulator_q.psqt_white;
                 self.finny_cache.white[bucket].pieces = self.pieces;
                 self.finny_cache.white[bucket].valid = true;
             } else {
                 nnue::apply_dirty_half_q(
-                    &mut self.accumulator_q.white, &mut self.accumulator_q.psqt_white,
+                        &mut self.accumulator_q.white[wk_bucket], &mut self.accumulator_q.psqt_white,
                     &self.acc_dirty, self.acc_dirty_num, wk, Color::White,
                 );
             }
             if self.acc_refresh_black {
                 let bucket = nnue::king_bucket_of(bk ^ 56);
                 if self.finny_cache.black[bucket].valid {
-                    self.accumulator_q.black = self.finny_cache.black[bucket].half;
+                    self.accumulator_q.black[bucket] = self.finny_cache.black[bucket].half;
                     self.accumulator_q.psqt_black = self.finny_cache.black[bucket].psqt;
                     let cached_pieces = self.finny_cache.black[bucket].pieces;
                     nnue::finny_update_half(
-                        &mut self.accumulator_q.black, &mut self.accumulator_q.psqt_black,
+                        &mut self.accumulator_q.black[bucket], &mut self.accumulator_q.psqt_black,
                         &cached_pieces, &self.pieces, bk, Color::Black,
                     );
                 } else {
                     nnue::refresh_half_q(
                         &self.pieces, bk,
-                        &mut self.accumulator_q.black, &mut self.accumulator_q.psqt_black,
+                        &mut self.accumulator_q.black[bucket], &mut self.accumulator_q.psqt_black,
                         Color::Black,
                     );
                 }
-                self.finny_cache.black[bucket].half = self.accumulator_q.black;
+                self.finny_cache.black[bucket].half = self.accumulator_q.black[bucket];
                 self.finny_cache.black[bucket].psqt = self.accumulator_q.psqt_black;
                 self.finny_cache.black[bucket].pieces = self.pieces;
                 self.finny_cache.black[bucket].valid = true;
             } else {
                 nnue::apply_dirty_half_q(
-                    &mut self.accumulator_q.black, &mut self.accumulator_q.psqt_black,
+                    &mut self.accumulator_q.black[bk_bucket], &mut self.accumulator_q.psqt_black,
                     &self.acc_dirty, self.acc_dirty_num, bk, Color::Black,
                 );
             }

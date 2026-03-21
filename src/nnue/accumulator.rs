@@ -30,8 +30,8 @@ impl DirtyPiece {
 
 #[derive(Clone)]
 pub struct Accumulator {
-    pub white: [f32; L1_SIZE],
-    pub black: [f32; L1_SIZE],
+    pub white: [[f32; L1_SIZE]; KING_BUCKETS],
+    pub black: [[f32; L1_SIZE]; KING_BUCKETS],
     pub psqt_white: [f32; NUM_PSQT_BUCKETS],
     pub psqt_black: [f32; NUM_PSQT_BUCKETS],
 }
@@ -39,8 +39,8 @@ pub struct Accumulator {
 impl Accumulator {
     pub fn new() -> Self {
         Accumulator {
-            white: [0.0; L1_SIZE],
-            black: [0.0; L1_SIZE],
+            white: [[0.0; L1_SIZE]; KING_BUCKETS],
+            black: [[0.0; L1_SIZE]; KING_BUCKETS],
             psqt_white: [0.0; NUM_PSQT_BUCKETS],
             psqt_black: [0.0; NUM_PSQT_BUCKETS],
         }
@@ -49,8 +49,8 @@ impl Accumulator {
 
 #[derive(Clone)]
 pub struct AccumulatorQ {
-    pub white: [i16; L1_SIZE],
-    pub black: [i16; L1_SIZE],
+    pub white: [[i16; L1_SIZE]; KING_BUCKETS],
+    pub black: [[i16; L1_SIZE]; KING_BUCKETS],
     pub psqt_white: [i32; NUM_PSQT_BUCKETS],
     pub psqt_black: [i32; NUM_PSQT_BUCKETS],
 }
@@ -58,8 +58,8 @@ pub struct AccumulatorQ {
 impl AccumulatorQ {
     pub fn new() -> Self {
         AccumulatorQ {
-            white: [0; L1_SIZE],
-            black: [0; L1_SIZE],
+            white: [[0; L1_SIZE]; KING_BUCKETS],
+            black: [[0; L1_SIZE]; KING_BUCKETS],
             psqt_white: [0; NUM_PSQT_BUCKETS],
             psqt_black: [0; NUM_PSQT_BUCKETS],
         }
@@ -250,10 +250,14 @@ pub fn apply_dirty_half_q(
 
 pub fn refresh_accumulator(board: &Board, acc: &mut Accumulator) {
     let w = weights();
-    acc.white = w.l1_biases;
-    acc.black = w.l1_biases;
+    // Initialize all buckets with biases
+    for bucket in 0..KING_BUCKETS {
+        acc.white[bucket] = w.l1_biases;
+        acc.black[bucket] = w.l1_biases;
+    }
     acc.psqt_white = [0.0; NUM_PSQT_BUCKETS];
     acc.psqt_black = [0.0; NUM_PSQT_BUCKETS];
+    
     if w.version == 1 {
         for color_idx in 0..COLOR_COUNT {
             let color = if color_idx == 0 { Color::White } else { Color::Black };
@@ -265,8 +269,8 @@ pub fn refresh_accumulator(board: &Board, acc: &mut Accumulator) {
                     let wi = feature_index_white(piece, color, sq);
                     let bi = feature_index_black(piece, color, sq);
                     for j in 0..L1_SIZE {
-                        acc.white[j] += w.l1_weights[wi][j];
-                        acc.black[j] += w.l1_weights[bi][j];
+                        acc.white[0][j] += w.l1_weights[wi][j];
+                        acc.black[0][j] += w.l1_weights[bi][j];
                     }
                     for b in 0..NUM_PSQT_BUCKETS {
                         acc.psqt_white[b] += w.psqt_weights[wi][b];
@@ -288,9 +292,11 @@ pub fn refresh_accumulator(board: &Board, acc: &mut Accumulator) {
                     let sq = pop_lsb(&mut bb);
                     let wi = feature_index_halfkp_white(piece, color, sq, white_king);
                     let bi = feature_index_halfkp_black(piece, color, sq, black_king);
+                    let wb = king_bucket_of(white_king);
+                    let bb_idx = king_bucket_of(black_king);
                     for j in 0..L1_SIZE {
-                        acc.white[j] += w.l1_weights[wi][j];
-                        acc.black[j] += w.l1_weights[bi][j];
+                        acc.white[wb][j] += w.l1_weights[wi][j];
+                        acc.black[bb_idx][j] += w.l1_weights[bi][j];
                     }
                     for b in 0..NUM_PSQT_BUCKETS {
                         acc.psqt_white[b] += w.psqt_weights[wi][b];
@@ -308,13 +314,15 @@ pub fn accumulator_add(acc: &mut Accumulator, piece: Piece, color: Color, sq: u8
     if w.version == 1 {
         let wi = feature_index_white(piece, color, sq);
         let bi = feature_index_black(piece, color, sq);
-        for j in 0..L1_SIZE { acc.white[j] += w.l1_weights[wi][j]; acc.black[j] += w.l1_weights[bi][j]; }
+        for j in 0..L1_SIZE { acc.white[0][j] += w.l1_weights[wi][j]; acc.black[0][j] += w.l1_weights[bi][j]; }
         for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += w.psqt_weights[wi][b]; acc.psqt_black[b] += w.psqt_weights[bi][b]; }
     } else {
         if piece == Piece::King { return; }
         let wi = feature_index_halfkp_white(piece, color, sq, white_king);
         let bi = feature_index_halfkp_black(piece, color, sq, black_king);
-        for j in 0..L1_SIZE { acc.white[j] += w.l1_weights[wi][j]; acc.black[j] += w.l1_weights[bi][j]; }
+        let wb = king_bucket_of(white_king);
+        let bb = king_bucket_of(black_king);
+        for j in 0..L1_SIZE { acc.white[wb][j] += w.l1_weights[wi][j]; acc.black[bb][j] += w.l1_weights[bi][j]; }
         for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += w.psqt_weights[wi][b]; acc.psqt_black[b] += w.psqt_weights[bi][b]; }
     }
 }
@@ -325,13 +333,15 @@ pub fn accumulator_remove(acc: &mut Accumulator, piece: Piece, color: Color, sq:
     if w.version == 1 {
         let wi = feature_index_white(piece, color, sq);
         let bi = feature_index_black(piece, color, sq);
-        for j in 0..L1_SIZE { acc.white[j] -= w.l1_weights[wi][j]; acc.black[j] -= w.l1_weights[bi][j]; }
+        for j in 0..L1_SIZE { acc.white[0][j] -= w.l1_weights[wi][j]; acc.black[0][j] -= w.l1_weights[bi][j]; }
         for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] -= w.psqt_weights[wi][b]; acc.psqt_black[b] -= w.psqt_weights[bi][b]; }
     } else {
         if piece == Piece::King { return; }
         let wi = feature_index_halfkp_white(piece, color, sq, white_king);
         let bi = feature_index_halfkp_black(piece, color, sq, black_king);
-        for j in 0..L1_SIZE { acc.white[j] -= w.l1_weights[wi][j]; acc.black[j] -= w.l1_weights[bi][j]; }
+        let wb = king_bucket_of(white_king);
+        let bb = king_bucket_of(black_king);
+        for j in 0..L1_SIZE { acc.white[wb][j] -= w.l1_weights[wi][j]; acc.black[bb][j] -= w.l1_weights[bi][j]; }
         for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] -= w.psqt_weights[wi][b]; acc.psqt_black[b] -= w.psqt_weights[bi][b]; }
     }
 }
@@ -344,7 +354,7 @@ pub fn accumulator_move(acc: &mut Accumulator, piece: Piece, color: Color, from:
         let wi_to   = feature_index_white(piece, color, to);
         let bi_from = feature_index_black(piece, color, from);
         let bi_to   = feature_index_black(piece, color, to);
-        for j in 0..L1_SIZE { acc.white[j] += w.l1_weights[wi_to][j] - w.l1_weights[wi_from][j]; acc.black[j] += w.l1_weights[bi_to][j] - w.l1_weights[bi_from][j]; }
+        for j in 0..L1_SIZE { acc.white[0][j] += w.l1_weights[wi_to][j] - w.l1_weights[wi_from][j]; acc.black[0][j] += w.l1_weights[bi_to][j] - w.l1_weights[bi_from][j]; }
         for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += w.psqt_weights[wi_to][b] - w.psqt_weights[wi_from][b]; acc.psqt_black[b] += w.psqt_weights[bi_to][b] - w.psqt_weights[bi_from][b]; }
     } else {
         if piece == Piece::King { return; }
@@ -352,17 +362,23 @@ pub fn accumulator_move(acc: &mut Accumulator, piece: Piece, color: Color, from:
         let wi_to   = feature_index_halfkp_white(piece, color, to, white_king);
         let bi_from = feature_index_halfkp_black(piece, color, from, black_king);
         let bi_to   = feature_index_halfkp_black(piece, color, to, black_king);
-        for j in 0..L1_SIZE { acc.white[j] += w.l1_weights[wi_to][j] - w.l1_weights[wi_from][j]; acc.black[j] += w.l1_weights[bi_to][j] - w.l1_weights[bi_from][j]; }
+        let wb = king_bucket_of(white_king);
+        let bb = king_bucket_of(black_king);
+        for j in 0..L1_SIZE { acc.white[wb][j] += w.l1_weights[wi_to][j] - w.l1_weights[wi_from][j]; acc.black[bb][j] += w.l1_weights[bi_to][j] - w.l1_weights[bi_from][j]; }
         for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += w.psqt_weights[wi_to][b] - w.psqt_weights[wi_from][b]; acc.psqt_black[b] += w.psqt_weights[bi_to][b] - w.psqt_weights[bi_from][b]; }
     }
 }
 
 pub fn refresh_accumulator_q(board: &Board, acc: &mut AccumulatorQ) {
     let wq = weights_q();
-    acc.white = wq.ft_biases;
-    acc.black = wq.ft_biases;
+    // Initialize all buckets with biases
+    for bucket in 0..KING_BUCKETS {
+        acc.white[bucket] = wq.ft_biases;
+        acc.black[bucket] = wq.ft_biases;
+    }
     acc.psqt_white = [0; NUM_PSQT_BUCKETS];
     acc.psqt_black = [0; NUM_PSQT_BUCKETS];
+    
     if wq.version == 1 {
         for color_idx in 0..COLOR_COUNT {
             let color = if color_idx == 0 { Color::White } else { Color::Black };
@@ -373,8 +389,8 @@ pub fn refresh_accumulator_q(board: &Board, acc: &mut AccumulatorQ) {
                     let sq = pop_lsb(&mut bb);
                     let wi = feature_index_white(piece, color, sq);
                     let bi = feature_index_black(piece, color, sq);
-                    simd::vec_add_i16(&mut acc.white, &wq.ft_weights[wi]);
-                    simd::vec_add_i16(&mut acc.black, &wq.ft_weights[bi]);
+                    simd::vec_add_i16(&mut acc.white[0], &wq.ft_weights[wi]);
+                    simd::vec_add_i16(&mut acc.black[0], &wq.ft_weights[bi]);
                     for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi][b]; acc.psqt_black[b] += wq.psqt_weights[bi][b]; }
                 }
             }
@@ -382,18 +398,20 @@ pub fn refresh_accumulator_q(board: &Board, acc: &mut AccumulatorQ) {
     } else {
         let white_king = board.king_sq(Color::White);
         let black_king = board.king_sq(Color::Black);
+        let wb = king_bucket_of(white_king);
+        let bb = king_bucket_of(black_king);
         for color_idx in 0..COLOR_COUNT {
             let color = if color_idx == 0 { Color::White } else { Color::Black };
             for piece_idx in 0..PIECE_COUNT {
                 let piece: Piece = unsafe { std::mem::transmute(piece_idx as u8) };
                 if piece == Piece::King { continue; }
-                let mut bb = board.pieces[color_idx][piece_idx];
-                while bb != 0 {
-                    let sq = pop_lsb(&mut bb);
+                let mut bb_pieces = board.pieces[color_idx][piece_idx];
+                while bb_pieces != 0 {
+                    let sq = pop_lsb(&mut bb_pieces);
                     let wi = feature_index_halfkp_white(piece, color, sq, white_king);
                     let bi = feature_index_halfkp_black(piece, color, sq, black_king);
-                    simd::vec_add_i16(&mut acc.white, &wq.ft_weights[wi]);
-                    simd::vec_add_i16(&mut acc.black, &wq.ft_weights[bi]);
+                    simd::vec_add_i16(&mut acc.white[wb], &wq.ft_weights[wi]);
+                    simd::vec_add_i16(&mut acc.black[bb], &wq.ft_weights[bi]);
                     for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi][b]; acc.psqt_black[b] += wq.psqt_weights[bi][b]; }
                 }
             }
@@ -407,15 +425,17 @@ pub fn accumulator_add_q(acc: &mut AccumulatorQ, piece: Piece, color: Color, sq:
     if wq.version == 1 {
         let wi = feature_index_white(piece, color, sq);
         let bi = feature_index_black(piece, color, sq);
-        simd::vec_add_i16(&mut acc.white, &wq.ft_weights[wi]);
-        simd::vec_add_i16(&mut acc.black, &wq.ft_weights[bi]);
+        simd::vec_add_i16(&mut acc.white[0], &wq.ft_weights[wi]);
+        simd::vec_add_i16(&mut acc.black[0], &wq.ft_weights[bi]);
         for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi][b]; acc.psqt_black[b] += wq.psqt_weights[bi][b]; }
     } else {
         if piece == Piece::King { return; }
         let wi = feature_index_halfkp_white(piece, color, sq, white_king);
         let bi = feature_index_halfkp_black(piece, color, sq, black_king);
-        simd::vec_add_i16(&mut acc.white, &wq.ft_weights[wi]);
-        simd::vec_add_i16(&mut acc.black, &wq.ft_weights[bi]);
+        let wb = king_bucket_of(white_king);
+        let bb = king_bucket_of(black_king);
+        simd::vec_add_i16(&mut acc.white[wb], &wq.ft_weights[wi]);
+        simd::vec_add_i16(&mut acc.black[bb], &wq.ft_weights[bi]);
         for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi][b]; acc.psqt_black[b] += wq.psqt_weights[bi][b]; }
     }
 }
@@ -426,15 +446,17 @@ pub fn accumulator_remove_q(acc: &mut AccumulatorQ, piece: Piece, color: Color, 
     if wq.version == 1 {
         let wi = feature_index_white(piece, color, sq);
         let bi = feature_index_black(piece, color, sq);
-        simd::vec_sub_i16(&mut acc.white, &wq.ft_weights[wi]);
-        simd::vec_sub_i16(&mut acc.black, &wq.ft_weights[bi]);
+        simd::vec_sub_i16(&mut acc.white[0], &wq.ft_weights[wi]);
+        simd::vec_sub_i16(&mut acc.black[0], &wq.ft_weights[bi]);
         for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] -= wq.psqt_weights[wi][b]; acc.psqt_black[b] -= wq.psqt_weights[bi][b]; }
     } else {
         if piece == Piece::King { return; }
         let wi = feature_index_halfkp_white(piece, color, sq, white_king);
         let bi = feature_index_halfkp_black(piece, color, sq, black_king);
-        simd::vec_sub_i16(&mut acc.white, &wq.ft_weights[wi]);
-        simd::vec_sub_i16(&mut acc.black, &wq.ft_weights[bi]);
+        let wb = king_bucket_of(white_king);
+        let bb = king_bucket_of(black_king);
+        simd::vec_sub_i16(&mut acc.white[wb], &wq.ft_weights[wi]);
+        simd::vec_sub_i16(&mut acc.black[bb], &wq.ft_weights[bi]);
         for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] -= wq.psqt_weights[wi][b]; acc.psqt_black[b] -= wq.psqt_weights[bi][b]; }
     }
 }
@@ -447,8 +469,8 @@ pub fn accumulator_move_q(acc: &mut AccumulatorQ, piece: Piece, color: Color, fr
         let wi_to   = feature_index_white(piece, color, to);
         let bi_from = feature_index_black(piece, color, from);
         let bi_to   = feature_index_black(piece, color, to);
-        simd::vec_add_sub_i16(&mut acc.white, &wq.ft_weights[wi_to], &wq.ft_weights[wi_from]);
-        simd::vec_add_sub_i16(&mut acc.black, &wq.ft_weights[bi_to], &wq.ft_weights[bi_from]);
+        simd::vec_add_sub_i16(&mut acc.white[0], &wq.ft_weights[wi_to], &wq.ft_weights[wi_from]);
+        simd::vec_add_sub_i16(&mut acc.black[0], &wq.ft_weights[bi_to], &wq.ft_weights[bi_from]);
         for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi_to][b] - wq.psqt_weights[wi_from][b]; acc.psqt_black[b] += wq.psqt_weights[bi_to][b] - wq.psqt_weights[bi_from][b]; }
     } else {
         if piece == Piece::King { return; }
@@ -456,8 +478,10 @@ pub fn accumulator_move_q(acc: &mut AccumulatorQ, piece: Piece, color: Color, fr
         let wi_to   = feature_index_halfkp_white(piece, color, to, white_king);
         let bi_from = feature_index_halfkp_black(piece, color, from, black_king);
         let bi_to   = feature_index_halfkp_black(piece, color, to, black_king);
-        simd::vec_add_sub_i16(&mut acc.white, &wq.ft_weights[wi_to], &wq.ft_weights[wi_from]);
-        simd::vec_add_sub_i16(&mut acc.black, &wq.ft_weights[bi_to], &wq.ft_weights[bi_from]);
+        let wb = king_bucket_of(white_king);
+        let bb = king_bucket_of(black_king);
+        simd::vec_add_sub_i16(&mut acc.white[wb], &wq.ft_weights[wi_to], &wq.ft_weights[wi_from]);
+        simd::vec_add_sub_i16(&mut acc.black[bb], &wq.ft_weights[bi_to], &wq.ft_weights[bi_from]);
         for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi_to][b] - wq.psqt_weights[wi_from][b]; acc.psqt_black[b] += wq.psqt_weights[bi_to][b] - wq.psqt_weights[bi_from][b]; }
     }
 }
@@ -469,8 +493,8 @@ mod tests {
     #[test]
     fn test_accumulator_new() {
         let acc = Accumulator::new();
-        assert!(acc.white.iter().all(|&v| v == 0.0));
-        assert!(acc.black.iter().all(|&v| v == 0.0));
+        assert!(acc.white.iter().all(|bucket| bucket.iter().all(|&v| v == 0.0)));
+        assert!(acc.black.iter().all(|bucket| bucket.iter().all(|&v| v == 0.0)));
         assert!(acc.psqt_white.iter().all(|&v| v == 0.0));
         assert!(acc.psqt_black.iter().all(|&v| v == 0.0));
     }
@@ -478,8 +502,8 @@ mod tests {
     #[test]
     fn test_accumulator_q_new() {
         let acc = AccumulatorQ::new();
-        assert!(acc.white.iter().all(|&v| v == 0));
-        assert!(acc.black.iter().all(|&v| v == 0));
+        assert!(acc.white.iter().all(|bucket| bucket.iter().all(|&v| v == 0)));
+        assert!(acc.black.iter().all(|bucket| bucket.iter().all(|&v| v == 0)));
         assert!(acc.psqt_white.iter().all(|&v| v == 0));
         assert!(acc.psqt_black.iter().all(|&v| v == 0));
     }

@@ -801,6 +801,7 @@ pub fn get_pv(board: &mut Board, tt: &TranspositionTable, max_depth: i32) -> Vec
 mod tests {
     use super::*;
     use crate::board::Board;
+    use crate::learn::ExpEntry;
 
     fn setup() {
         crate::zobrist::init();
