@@ -49,6 +49,8 @@ pub fn uci_loop() {
                 println!("id name {}", ENGINE_NAME);
                 println!("id author {}", ENGINE_AUTHOR);
                 println!("option name Hash type spin default 64 min 1 max 4096");
+                println!("option name SyzygyPath type string default");
+                println!("option name SyzygyProbeDepth type spin default 1 min 1 max 64");
                 println!("option name ExperienceFile type string default nagato.exp");
                 println!("option name Experience type check default true");
                 println!("uciok");
@@ -75,6 +77,23 @@ pub fn uci_loop() {
                 if use_experience {
                     recorder.set_our_color(board.side.index() as u8);
                 }
+                if let Some(tb_uci) = crate::syzygy::probe_bestmove_uci(&board, depth) {
+                    if let Some(tb_move) = parse_uci_move(&board, &tb_uci) {
+                        println!("info string syzygy bestmove {}", tb_uci);
+                        if use_experience {
+                            recorder.record(
+                                board.hash,
+                                tb_move,
+                                depth as i8,
+                                0,
+                                board.side.index() as u8,
+                            );
+                        }
+                        println!("bestmove {}", tb_move);
+                        continue;
+                    }
+                }
+
                 let exp_ref = if use_experience { &exp_table } else { &ExpTable::new() };
                 let result = search::search(&mut board, &mut tt, exp_ref, time_ms, depth);
                 if use_experience {
@@ -227,6 +246,19 @@ fn parse_setoption(tokens: &[&str], tt: &mut TranspositionTable, exp_path: &mut 
             if let Ok(mb) = value.parse::<usize>() {
                 *tt = TranspositionTable::new(mb.clamp(1, 4096));
             }
+        }
+        "syzygypath" => {
+            crate::syzygy::set_path(&value);
+            if value.is_empty() {
+                eprintln!("info string SyzygyPath cleared");
+            } else {
+                eprintln!("info string SyzygyPath set to {}", value);
+            }
+        }
+        "syzygyprobedepth" => {
+            let depth = value.parse::<i32>().ok().unwrap_or(1).clamp(1, 64);
+            crate::syzygy::set_probe_depth(depth);
+            eprintln!("info string SyzygyProbeDepth set to {}", depth);
         }
         "experiencefile" => {
             if !value.is_empty() {

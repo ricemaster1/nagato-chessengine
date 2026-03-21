@@ -6,6 +6,7 @@ mod zobrist;
 mod uci;
 mod search;
 mod eval;
+mod syzygy;
 mod learn;
 mod datagen;
 mod nnue;

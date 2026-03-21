@@ -6,6 +6,8 @@ description = "Nagato — a chess engine forged in Rust, named after the IJN Nag
 
 [dependencies]
 rand = "0.8"
+shakmaty = "0.30.0"
+shakmaty-syzygy = "0.28.0"
 
 [profile.release]
 opt-level = 3
