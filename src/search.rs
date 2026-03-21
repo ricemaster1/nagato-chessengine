@@ -353,6 +353,10 @@ fn alpha_beta(
         return beta;
     }
 
+    if let Some(tb_score) = crate::syzygy::probe_wdl_score(board, depth, ply) {
+        return tb_score;
+    }
+
     let mut tt_move = MOVE_NONE;
     if let Some(entry) = tt.probe(board.hash) {
         tt_move = entry.best_move;

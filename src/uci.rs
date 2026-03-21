@@ -55,6 +55,8 @@ pub fn uci_loop() {
                 println!("id author {}", ENGINE_AUTHOR);
                 println!("option name Hash type spin default 64 min 1 max 4096");
                 println!("option name Threads type spin default 1 min 1 max {}", max_threads);
+                println!("option name SyzygyPath type string default");
+                println!("option name SyzygyProbeDepth type spin default 1 min 1 max 64");
                 println!("option name ExperienceFile type string default nagato.exp");
                 println!("option name Experience type check default true");
                 println!("uciok");
@@ -262,6 +264,19 @@ fn parse_setoption(
             }
             let _ = max_threads;
             *threads = 1;
+        }
+        "syzygypath" => {
+            crate::syzygy::set_path(&value);
+            if value.is_empty() {
+                eprintln!("info string SyzygyPath cleared");
+            } else {
+                eprintln!("info string SyzygyPath set to {}", value);
+            }
+        }
+        "syzygyprobedepth" => {
+            let depth = value.parse::<i32>().ok().unwrap_or(1).clamp(1, 64);
+            crate::syzygy::set_probe_depth(depth);
+            eprintln!("info string SyzygyProbeDepth set to {}", depth);
         }
         "experiencefile" => {
             if !value.is_empty() {
