@@ -55,6 +55,14 @@ pub fn material_balance(board: &Board) -> i32 {
 }
 
 pub fn evaluate(board: &Board) -> i32 {
+    // Intercept specific endgames (like KBNvK) before standard evaluation
+    if let Some(endgame_score) = evaluate_endgame(board) {
+        return match board.side {
+            Color::White => endgame_score,
+            Color::Black => -endgame_score,
+        };
+    }
+
     if nnue::is_active() {
         let mb = material_balance(board);
         if mb.abs() >= DUAL_NET_THRESHOLD {
