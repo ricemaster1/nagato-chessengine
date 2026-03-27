@@ -3,13 +3,13 @@ target/
 
 # IDE / Editor
 .vscode/
+.github/
 .idea/
 .ipynb_checkpoints/
 __pycache__/
 *.pyc
 *.swp
 *.swo
-*~
 
 # OS
 .DS_Store
