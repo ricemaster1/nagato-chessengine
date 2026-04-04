@@ -3,6 +3,28 @@ pub mod kbnk;
 use crate::bitboard::*;
 use crate::board::Board;
 
+#[cfg(feature = "kbnk-scaling")]
+const KBNK_WHITE: u64 = (1u64 << 24) | (1u64 << 32);
+#[cfg(feature = "kbnk-scaling")]
+const KBNK_BLACK: u64 = (1u64 << 28) | (1u64 << 36);
+
+#[cfg(feature = "kbnk-scaling")]
+fn material_key(board: &Board) -> u64 {
+    let wp = popcount(board.pieces[Color::White.index()][Piece::Pawn.index()]) as u64;
+    let bp = popcount(board.pieces[Color::Black.index()][Piece::Pawn.index()]) as u64;
+    let wq = popcount(board.pieces[Color::White.index()][Piece::Queen.index()]) as u64;
+    let bq = popcount(board.pieces[Color::Black.index()][Piece::Queen.index()]) as u64;
+    let wr = popcount(board.pieces[Color::White.index()][Piece::Rook.index()]) as u64;
+    let br = popcount(board.pieces[Color::Black.index()][Piece::Rook.index()]) as u64;
+    let wb = popcount(board.pieces[Color::White.index()][Piece::Bishop.index()]) as u64;
+    let bb = popcount(board.pieces[Color::Black.index()][Piece::Bishop.index()]) as u64;
+    let wn = popcount(board.pieces[Color::White.index()][Piece::Knight.index()]) as u64;
+    let bn = popcount(board.pieces[Color::Black.index()][Piece::Knight.index()]) as u64;
+
+    wp | (bp << 4) | (wq << 8) | (bq << 12) | (wr << 16) | (br << 20)
+        | (wb << 24) | (bb << 28) | (wn << 32) | (bn << 36)
+}
+
 pub fn evaluate_endgame(board: &Board) -> Option<i32> {
     #[cfg(not(feature = "kbnk-scaling"))]
     {
@@ -12,36 +34,11 @@ pub fn evaluate_endgame(board: &Board) -> Option<i32> {
 
     #[cfg(feature = "kbnk-scaling")]
     {
-    let w_pawns = popcount(board.pieces[Color::White.index()][Piece::Pawn.index()]);
-    let b_pawns = popcount(board.pieces[Color::Black.index()][Piece::Pawn.index()]);
-    if w_pawns > 0 || b_pawns > 0 {
-        return None;
-    }
-
-    let w_rooks = popcount(board.pieces[Color::White.index()][Piece::Rook.index()]);
-    let b_rooks = popcount(board.pieces[Color::Black.index()][Piece::Rook.index()]);
-    let w_queens = popcount(board.pieces[Color::White.index()][Piece::Queen.index()]);
-    let b_queens = popcount(board.pieces[Color::Black.index()][Piece::Queen.index()]);
-    if w_rooks > 0 || b_rooks > 0 || w_queens > 0 || b_queens > 0 {
-        return None;
-    }
-
-    let w_bishops = popcount(board.pieces[Color::White.index()][Piece::Bishop.index()]);
-    let b_bishops = popcount(board.pieces[Color::Black.index()][Piece::Bishop.index()]);
-    let w_knights = popcount(board.pieces[Color::White.index()][Piece::Knight.index()]);
-    let b_knights = popcount(board.pieces[Color::Black.index()][Piece::Knight.index()]);
-
-    let w_minor_count = w_bishops + w_knights;
-    let b_minor_count = b_bishops + b_knights;
-
-    if w_minor_count == 2 && w_bishops == 1 && w_knights == 1 && b_minor_count == 0 {
-        return Some(kbnk::eval_kbnk(board, Color::White));
-    }
-
-    if b_minor_count == 2 && b_bishops == 1 && b_knights == 1 && w_minor_count == 0 {
-        return Some(-kbnk::eval_kbnk(board, Color::Black));
-    }
-
-    None
+        let key = material_key(board);
+        match key {
+            k if k == KBNK_WHITE => Some(kbnk::eval_kbnk(board, Color::White)),
+            k if k == KBNK_BLACK => Some(-kbnk::eval_kbnk(board, Color::Black)),
+            _ => None,
+        }
     }
 }
