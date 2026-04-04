@@ -23,6 +23,13 @@ const PROBCUT_MIN_DEPTH: i32 = 5;
 const PROBCUT_MARGIN: i32 = 180;
 const PROBCUT_REDUCTION: i32 = 3;
 
+#[cfg(feature = "sphere-search")]
+const SPHERE_AMPLITUDE: i32 = 60;
+#[cfg(feature = "sphere-search")]
+const SPHERE_QUIET_THRESHOLD: usize = 4;
+#[cfg(feature = "sphere-search")]
+const SPHERE_MAX_DEPTH: i32 = 6;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TTFlag {
     None,
@@ -236,6 +243,16 @@ fn pick_move(list: &mut MoveList, scores: &mut [i32], start: usize) {
         list.moves.swap(start, best_idx);
         scores.swap(start, best_idx);
     }
+}
+
+#[cfg(feature = "sphere-search")]
+fn sphere_perturb(base: i32, hash: u64, ply: usize, depth: i32, quiet_idx: usize) -> i32 {
+    let seed = hash
+        ^ (ply as u64).wrapping_mul(0x9e3779b97f4a7c15)
+        ^ (depth as u64).wrapping_mul(0x6c62272e07bb0142)
+        ^ (quiet_idx as u64).wrapping_mul(0xd6e8feb86659fd93);
+    let noise = ((seed >> (quiet_idx % 32)) & 0xFF) as i32 - 128;
+    base + (noise * SPHERE_AMPLITUDE) / 128
 }
 
 fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInfo, _exp: &ExpTable, ply: usize) -> i32 {
@@ -516,6 +533,24 @@ fn alpha_beta(
     movegen::generate_moves(board, &mut list);
 
     let mut scores = score_moves(&list, board, info, ply, tt_move, exp, prev_move);
+
+    #[cfg(feature = "sphere-search")]
+    if depth <= SPHERE_MAX_DEPTH && board.all_occupancy.count_ones() > 5 {
+        let mut quiet_idx: usize = 0;
+        for i in 0..list.len() {
+            let m = list.moves[i];
+            let is_quiet_tail = !m.is_capture()
+                && !m.is_promotion()
+                && !m.is_en_passant()
+                && scores[i] < 650_000;
+            if is_quiet_tail {
+                if quiet_idx >= SPHERE_QUIET_THRESHOLD {
+                    scores[i] = sphere_perturb(scores[i], board.hash, ply, depth, quiet_idx);
+                }
+                quiet_idx += 1;
+            }
+        }
+    }
 
     let mut best_move = MOVE_NONE;
     let mut best_score = -INFINITY;
