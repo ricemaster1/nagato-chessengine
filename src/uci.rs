@@ -525,6 +525,11 @@ fn parse_go(tokens: &[&str], board: &Board) -> (u64, i32) {
     (time_ms, depth)
 }
 
+pub fn bench() {
+    let mut tt = TranspositionTable::new(64);
+    run_bench(&mut tt);
+}
+
 fn run_bench(tt: &mut TranspositionTable) {
     let positions = [
         "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
