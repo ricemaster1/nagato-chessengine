@@ -2,6 +2,7 @@
 use crate::bitboard::*;
 use crate::board::Board;
 use crate::eval::{self, INFINITY, MATE_SCORE};
+use crate::nnue;
 use crate::learn::ExpTable;
 use crate::movegen;
 use crate::moves::*;
@@ -236,7 +237,12 @@ fn pick_move(list: &mut MoveList, scores: &mut [i32], start: usize) {
     }
 }
 
-fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInfo, _exp: &ExpTable) -> i32 {
+fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInfo, _exp: &ExpTable, ply: usize) -> i32 {
+    if ply >= nnue::MAX_PLY {
+        board.ensure_acc_computed();
+        return eval::evaluate(board);
+    }
+
     info.nodes += 1;
     info.check_time();
     if info.stopped {
@@ -278,7 +284,7 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInf
             continue;
         }
 
-        let score = -quiescence(board, -beta, -alpha, info, _exp);
+        let score = -quiescence(board, -beta, -alpha, info, _exp, ply + 1);
         board.unmake_move(m);
 
         if info.stopped {
@@ -308,13 +314,18 @@ fn alpha_beta(
     do_null: bool,
     prev_move: Move,
 ) -> i32 {
+    if ply >= nnue::MAX_PLY {
+        board.ensure_acc_computed();
+        return eval::evaluate(board);
+    }
+
     let in_check = board.in_check();
     if in_check {
         depth += 1;
     }
 
     if depth <= 0 {
-        return quiescence(board, alpha, beta, info, exp);
+        return quiescence(board, alpha, beta, info, exp, ply);
     }
 
     info.nodes += 1;

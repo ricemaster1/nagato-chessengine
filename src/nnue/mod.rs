@@ -56,6 +56,7 @@ impl ArchConfig {
 }
 
 pub use accumulator::{
+    MAX_PLY,
     Accumulator,
     AccumulatorQ,
     AccStackQ,

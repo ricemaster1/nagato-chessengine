@@ -66,7 +66,7 @@ impl AccumulatorQ {
     }
 }
 
-const MAX_PLY: usize = 128;
+pub const MAX_PLY: usize = 128;
 
 pub struct AccStackQ {
     entries: Box<[AccumulatorQ; MAX_PLY]>,

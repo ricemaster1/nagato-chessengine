@@ -347,6 +347,7 @@ fn parse_position(tokens: &[&str], board: &mut Board) {
             idx += 1;
         }
     }
+    board.acc_stack_q.clear();
 }
 
 fn parse_uci_move(board: &Board, uci: &str) -> Option<Move> {
