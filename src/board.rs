@@ -385,6 +385,9 @@ impl Board {
         let nnue_active = nnue::is_active();
 
         if nnue_active {
+            if self.acc_stack_q.is_full() {
+                return false;
+            }
             self.ensure_acc_computed();
             self.acc_stack_q.push(&self.accumulator_q);
         }

@@ -111,6 +111,11 @@ impl AccStackQ {
     pub fn clear(&mut self) {
         self.sp = 0;
     }
+
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        self.sp >= MAX_PLY
+    }
 }
 
 #[derive(Clone)]
