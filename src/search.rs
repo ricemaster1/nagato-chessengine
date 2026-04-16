@@ -6,6 +6,7 @@ use crate::nnue;
 use crate::learn::ExpTable;
 use crate::movegen;
 use crate::moves::*;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Instant;
@@ -894,6 +895,7 @@ pub fn search_threads(
         nps,
         best.best_move.to_uci(),
     );
+    let _ = std::io::stdout().flush();
 
     SearchResult {
         best_move: best.best_move,
@@ -974,6 +976,7 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, ti
             nps,
             pv,
         );
+        let _ = std::io::stdout().flush();
 
         if eval::is_mate_score(score) {
             break;

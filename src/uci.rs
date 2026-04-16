@@ -7,7 +7,7 @@ use crate::movegen;
 use crate::moves::*;
 use crate::nnue;
 use crate::search::{self, TranspositionTable};
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 const ENGINE_NAME: &str = "Nagato";
@@ -60,9 +60,11 @@ pub fn uci_loop() {
                 println!("option name ExperienceFile type string default nagato.exp");
                 println!("option name Experience type check default true");
                 println!("uciok");
+                let _ = io::stdout().flush();
             }
             "isready" => {
                 println!("readyok");
+                let _ = io::stdout().flush();
             }
             "ucinewgame" => {
                 if use_experience && recorder.recorded_count() > 0 {
@@ -96,6 +98,7 @@ pub fn uci_loop() {
                             );
                         }
                         println!("bestmove {}", tb_move);
+                        let _ = io::stdout().flush();
                         continue;
                     }
                 }
@@ -114,6 +117,7 @@ pub fn uci_loop() {
                     );
                 }
                 println!("bestmove {}", result.best_move);
+                let _ = io::stdout().flush();
             }
             "gameover" => {
                 if use_experience {
