@@ -376,41 +376,23 @@ pub fn refresh_accumulator_q(board: &Board, acc: &mut AccumulatorQ) {
     }
     acc.psqt_white = [0; NUM_PSQT_BUCKETS];
     acc.psqt_black = [0; NUM_PSQT_BUCKETS];
-    
-    if wq.version == 1 {
-        for color_idx in 0..COLOR_COUNT {
-            let color = if color_idx == 0 { Color::White } else { Color::Black };
-            for piece_idx in 0..PIECE_COUNT {
-                let piece: Piece = unsafe { std::mem::transmute(piece_idx as u8) };
-                let mut bb = board.pieces[color_idx][piece_idx];
-                while bb != 0 {
-                    let sq = pop_lsb(&mut bb);
-                    let wi = feature_index_white(piece, color, sq);
-                    let bi = feature_index_black(piece, color, sq);
-                    simd::vec_add_i16(&mut acc.white[0], &wq.ft_weights[wi]);
-                    simd::vec_add_i16(&mut acc.black[0], &wq.ft_weights[bi]);
-                    for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi][b]; acc.psqt_black[b] += wq.psqt_weights[bi][b]; }
-                }
-            }
-        }
-    } else {
-        let white_king = board.king_sq(Color::White);
-        let black_king = board.king_sq(Color::Black);
-        let wb = king_bucket_of(white_king);
-        let bb = king_bucket_of(black_king);
-        for color_idx in 0..COLOR_COUNT {
-            let color = if color_idx == 0 { Color::White } else { Color::Black };
-            for piece_idx in 0..PIECE_COUNT {
-                let piece: Piece = unsafe { std::mem::transmute(piece_idx as u8) };
-                let mut bb_pieces = board.pieces[color_idx][piece_idx];
-                while bb_pieces != 0 {
-                    let sq = pop_lsb(&mut bb_pieces);
-                    let wi = feature_index_halfka_white(piece, color, sq, white_king);
-                    let bi = feature_index_halfka_black(piece, color, sq, black_king);
-                    simd::vec_add_i16(&mut acc.white[wb], &wq.ft_weights[wi]);
-                    simd::vec_add_i16(&mut acc.black[bb], &wq.ft_weights[bi]);
-                    for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi][b]; acc.psqt_black[b] += wq.psqt_weights[bi][b]; }
-                }
+
+    let white_king = board.king_sq(Color::White);
+    let black_king = board.king_sq(Color::Black);
+    let wb = king_bucket_of(white_king);
+    let bb = king_bucket_of(black_king);
+    for color_idx in 0..COLOR_COUNT {
+        let color = if color_idx == 0 { Color::White } else { Color::Black };
+        for piece_idx in 0..PIECE_COUNT {
+            let piece: Piece = unsafe { std::mem::transmute(piece_idx as u8) };
+            let mut bb_pieces = board.pieces[color_idx][piece_idx];
+            while bb_pieces != 0 {
+                let sq = pop_lsb(&mut bb_pieces);
+                let wi = feature_index_halfka_white(piece, color, sq, white_king);
+                let bi = feature_index_halfka_black(piece, color, sq, black_king);
+                simd::vec_add_i16(&mut acc.white[wb], &wq.ft_weights[wi]);
+                simd::vec_add_i16(&mut acc.black[bb], &wq.ft_weights[bi]);
+                for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi][b]; acc.psqt_black[b] += wq.psqt_weights[bi][b]; }
             }
         }
     }
@@ -419,65 +401,39 @@ pub fn refresh_accumulator_q(board: &Board, acc: &mut AccumulatorQ) {
 #[inline]
 pub fn accumulator_add_q(acc: &mut AccumulatorQ, piece: Piece, color: Color, sq: u8, white_king: u8, black_king: u8) {
     let wq = weights_q();
-    if wq.version == 1 {
-        let wi = feature_index_white(piece, color, sq);
-        let bi = feature_index_black(piece, color, sq);
-        simd::vec_add_i16(&mut acc.white[0], &wq.ft_weights[wi]);
-        simd::vec_add_i16(&mut acc.black[0], &wq.ft_weights[bi]);
-        for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi][b]; acc.psqt_black[b] += wq.psqt_weights[bi][b]; }
-    } else {
-        let wi = feature_index_halfka_white(piece, color, sq, white_king);
-        let bi = feature_index_halfka_black(piece, color, sq, black_king);
-        let wb = king_bucket_of(white_king);
-        let bb = king_bucket_of(black_king);
-        simd::vec_add_i16(&mut acc.white[wb], &wq.ft_weights[wi]);
-        simd::vec_add_i16(&mut acc.black[bb], &wq.ft_weights[bi]);
-        for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi][b]; acc.psqt_black[b] += wq.psqt_weights[bi][b]; }
-    }
+    let wi = feature_index_halfka_white(piece, color, sq, white_king);
+    let bi = feature_index_halfka_black(piece, color, sq, black_king);
+    let wb = king_bucket_of(white_king);
+    let bb = king_bucket_of(black_king);
+    simd::vec_add_i16(&mut acc.white[wb], &wq.ft_weights[wi]);
+    simd::vec_add_i16(&mut acc.black[bb], &wq.ft_weights[bi]);
+    for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi][b]; acc.psqt_black[b] += wq.psqt_weights[bi][b]; }
 }
 
 #[inline]
 pub fn accumulator_remove_q(acc: &mut AccumulatorQ, piece: Piece, color: Color, sq: u8, white_king: u8, black_king: u8) {
     let wq = weights_q();
-    if wq.version == 1 {
-        let wi = feature_index_white(piece, color, sq);
-        let bi = feature_index_black(piece, color, sq);
-        simd::vec_sub_i16(&mut acc.white[0], &wq.ft_weights[wi]);
-        simd::vec_sub_i16(&mut acc.black[0], &wq.ft_weights[bi]);
-        for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] -= wq.psqt_weights[wi][b]; acc.psqt_black[b] -= wq.psqt_weights[bi][b]; }
-    } else {
-        let wi = feature_index_halfka_white(piece, color, sq, white_king);
-        let bi = feature_index_halfka_black(piece, color, sq, black_king);
-        let wb = king_bucket_of(white_king);
-        let bb = king_bucket_of(black_king);
-        simd::vec_sub_i16(&mut acc.white[wb], &wq.ft_weights[wi]);
-        simd::vec_sub_i16(&mut acc.black[bb], &wq.ft_weights[bi]);
-        for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] -= wq.psqt_weights[wi][b]; acc.psqt_black[b] -= wq.psqt_weights[bi][b]; }
-    }
+    let wi = feature_index_halfka_white(piece, color, sq, white_king);
+    let bi = feature_index_halfka_black(piece, color, sq, black_king);
+    let wb = king_bucket_of(white_king);
+    let bb = king_bucket_of(black_king);
+    simd::vec_sub_i16(&mut acc.white[wb], &wq.ft_weights[wi]);
+    simd::vec_sub_i16(&mut acc.black[bb], &wq.ft_weights[bi]);
+    for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] -= wq.psqt_weights[wi][b]; acc.psqt_black[b] -= wq.psqt_weights[bi][b]; }
 }
 
 #[inline]
 pub fn accumulator_move_q(acc: &mut AccumulatorQ, piece: Piece, color: Color, from: u8, to: u8, white_king: u8, black_king: u8) {
     let wq = weights_q();
-    if wq.version == 1 {
-        let wi_from = feature_index_white(piece, color, from);
-        let wi_to   = feature_index_white(piece, color, to);
-        let bi_from = feature_index_black(piece, color, from);
-        let bi_to   = feature_index_black(piece, color, to);
-        simd::vec_add_sub_i16(&mut acc.white[0], &wq.ft_weights[wi_to], &wq.ft_weights[wi_from]);
-        simd::vec_add_sub_i16(&mut acc.black[0], &wq.ft_weights[bi_to], &wq.ft_weights[bi_from]);
-        for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi_to][b] - wq.psqt_weights[wi_from][b]; acc.psqt_black[b] += wq.psqt_weights[bi_to][b] - wq.psqt_weights[bi_from][b]; }
-    } else {
-        let wi_from = feature_index_halfka_white(piece, color, from, white_king);
-        let wi_to   = feature_index_halfka_white(piece, color, to, white_king);
-        let bi_from = feature_index_halfka_black(piece, color, from, black_king);
-        let bi_to   = feature_index_halfka_black(piece, color, to, black_king);
-        let wb = king_bucket_of(white_king);
-        let bb = king_bucket_of(black_king);
-        simd::vec_add_sub_i16(&mut acc.white[wb], &wq.ft_weights[wi_to], &wq.ft_weights[wi_from]);
-        simd::vec_add_sub_i16(&mut acc.black[bb], &wq.ft_weights[bi_to], &wq.ft_weights[bi_from]);
-        for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi_to][b] - wq.psqt_weights[wi_from][b]; acc.psqt_black[b] += wq.psqt_weights[bi_to][b] - wq.psqt_weights[bi_from][b]; }
-    }
+    let wi_from = feature_index_halfka_white(piece, color, from, white_king);
+    let wi_to   = feature_index_halfka_white(piece, color, to, white_king);
+    let bi_from = feature_index_halfka_black(piece, color, from, black_king);
+    let bi_to   = feature_index_halfka_black(piece, color, to, black_king);
+    let wb = king_bucket_of(white_king);
+    let bb = king_bucket_of(black_king);
+    simd::vec_add_sub_i16(&mut acc.white[wb], &wq.ft_weights[wi_to], &wq.ft_weights[wi_from]);
+    simd::vec_add_sub_i16(&mut acc.black[bb], &wq.ft_weights[bi_to], &wq.ft_weights[bi_from]);
+    for b in 0..NUM_PSQT_BUCKETS { acc.psqt_white[b] += wq.psqt_weights[wi_to][b] - wq.psqt_weights[wi_from][b]; acc.psqt_black[b] += wq.psqt_weights[bi_to][b] - wq.psqt_weights[bi_from][b]; }
 }
 
 #[cfg(test)]
