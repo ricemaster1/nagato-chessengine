@@ -25,9 +25,9 @@ pub fn king_bucket_of(sq: u8) -> usize {
     KING_BUCKET_MAPPER[rank as usize][file_m as usize]
 }
 
-pub const PIECES_EX_KING: usize = 5;
+pub const PIECES: usize = 6;
 pub const SQUARES_PER_PIECE: usize = 64;
-pub const PER_COLOR_BUCKET: usize = PIECES_EX_KING * SQUARES_PER_PIECE;
+pub const PER_COLOR_BUCKET: usize = PIECES * SQUARES_PER_PIECE;
 pub const PER_BUCKET_FEATURES: usize = PER_COLOR_BUCKET * 2;
 
 #[inline]
@@ -45,9 +45,8 @@ pub fn piece_index_no_king(piece: Piece) -> Option<usize> {
 #[inline]
 pub fn feature_index_halfka_white(piece: Piece, color: Color, sq: u8, king_sq: u8) -> usize {
     let bucket = king_bucket_of(king_sq);
-    let piece_no_king = piece_index_no_king(piece).expect("King has no HalfKP feature");
     let color_offset = match color { Color::White => 0, Color::Black => PER_COLOR_BUCKET };
-    bucket * PER_BUCKET_FEATURES + color_offset + piece_no_king * 64 + sq as usize
+    bucket * PER_BUCKET_FEATURES + color_offset + piece.index() * 64 + sq as usize
 }
 
 #[inline]
@@ -55,9 +54,8 @@ pub fn feature_index_halfka_black(piece: Piece, color: Color, sq: u8, king_sq: u
     let flipped = sq ^ 56;
     let flipped_king = king_sq ^ 56;
     let bucket = king_bucket_of(flipped_king);
-    let piece_no_king = piece_index_no_king(piece).expect("King has no HalfKP feature");
     let color_offset = match color { Color::Black => 0, Color::White => PER_COLOR_BUCKET };
-    bucket * PER_BUCKET_FEATURES + color_offset + piece_no_king * 64 + flipped as usize
+    bucket * PER_BUCKET_FEATURES + color_offset + piece.index() * 64 + flipped as usize
 }
 
 pub struct HalfKaFeatures {
@@ -76,10 +74,6 @@ pub fn transform_halfka(board: &Board) -> HalfKaFeatures {
         let color = if color_idx == 0 { Color::White } else { Color::Black };
         for piece_idx in 0..PIECE_COUNT {
             let piece = Piece::from_index(piece_idx);
-            if piece_index_no_king(piece).is_none() {
-                continue;
-            }
-
             let mut bb = board.pieces[color.index()][piece_idx];
             while bb != 0 {
                 let sq = pop_lsb(&mut bb);
@@ -189,10 +183,10 @@ mod tests {
     fn test_halfka_white_index_bounds() {
         let total = KING_BUCKETS * PER_BUCKET_FEATURES;
         for king in [sq::E1, sq::A1, sq::H1, sq::D4, sq::G8] {
-            for &piece in &[Piece::Pawn, Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
+            for &piece in &[Piece::Pawn, Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen, Piece::King] {
                 for &color in &[Color::White, Color::Black] {
                     for sq in 0..64u8 {
-                        let idx = feature_index_halfkp_white(piece, color, sq, king);
+                        let idx = feature_index_halfka_white(piece, color, sq, king);
                         assert!(idx < total, "white idx {} >= {} for king={} piece={:?} color={:?} sq={}",
                             idx, total, king, piece, color, sq);
                     }
@@ -205,10 +199,10 @@ mod tests {
     fn test_halfka_black_index_bounds() {
         let total = KING_BUCKETS * PER_BUCKET_FEATURES;
         for king in [sq::E8, sq::A8, sq::H8, sq::D5, sq::G1] {
-            for &piece in &[Piece::Pawn, Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
+            for &piece in &[Piece::Pawn, Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen, Piece::King] {
                 for &color in &[Color::White, Color::Black] {
                     for sq in 0..64u8 {
-                        let idx = feature_index_halfkp_black(piece, color, sq, king);
+                        let idx = feature_index_halfka_black(piece, color, sq, king);
                         assert!(idx < total, "black idx {} >= {} for king={} piece={:?} color={:?} sq={}",
                             idx, total, king, piece, color, sq);
                     }
@@ -219,30 +213,26 @@ mod tests {
 
     #[test]
     fn test_halfka_perspective_symmetry() {
-        let w = feature_index_halfkp_white(Piece::Pawn, Color::White, sq::E2, sq::E1);
-        let b = feature_index_halfkp_black(Piece::Pawn, Color::Black, sq::E7, sq::E8);
+        let w = feature_index_halfka_white(Piece::Pawn, Color::White, sq::E2, sq::E1);
+        let b = feature_index_halfka_black(Piece::Pawn, Color::Black, sq::E7, sq::E8);
         assert_eq!(w, b);
     }
 
     #[test]
     fn test_halfka_different_buckets_differ() {
-        let idx_a = feature_index_halfkp_white(Piece::Pawn, Color::White, sq::E2, sq::E1);
-        let idx_b = feature_index_halfkp_white(Piece::Pawn, Color::White, sq::E2, sq::E4);
+        let idx_a = feature_index_halfka_white(Piece::Pawn, Color::White, sq::E2, sq::E1);
+        let idx_b = feature_index_halfka_white(Piece::Pawn, Color::White, sq::E2, sq::E4);
         assert_ne!(idx_a, idx_b);
     }
 
     #[test]
-    fn test_transform_halfka_startpos_size() {
-        let board = Board::start_pos();
-        let transformed = transform_halfkp(&board);
-        assert_eq!(transformed.white.len(), 30);
-        assert_eq!(transformed.black.len(), 30);
-    }
-
-    #[test]
-    #[should_panic(expected = "King has no HalfKP feature")]
-    fn test_halfka_rejects_king_piece() {
-        feature_index_halfkp_white(Piece::King, Color::White, sq::E1, sq::E1);
+    fn test_halfka_includes_king() {
+        let idx_wk = feature_index_halfka_white(Piece::King, Color::White, sq::E1, sq::E1);
+        let idx_bk = feature_index_halfka_white(Piece::King, Color::Black, sq::E8, sq::E1);
+        assert_ne!(idx_wk, idx_bk);
+        let total = KING_BUCKETS * PER_BUCKET_FEATURES;
+        assert!(idx_wk < total);
+        assert!(idx_bk < total);
     }
 
     #[test]

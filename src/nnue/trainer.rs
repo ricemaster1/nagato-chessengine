@@ -389,11 +389,11 @@ mod tests {
         let mut buf = Vec::new();
         datagen::write_entry_pub(&mut buf, &board, 25, 2);
         let sample = parse_entry(&buf).unwrap();
-        assert_eq!(sample.white_features.len(), 30);
-        assert_eq!(sample.black_features.len(), 30);
+        assert_eq!(sample.white_features.len(), 32);
+        assert_eq!(sample.black_features.len(), 32);
         assert!((sample.score - 25.0).abs() < 0.01);
         assert!((sample.wdl - 1.0).abs() < 0.01);
-        assert_eq!(sample.piece_count, 30);
+        assert_eq!(sample.piece_count, 32);
     }
 
     #[test]
