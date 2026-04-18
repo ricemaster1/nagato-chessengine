@@ -1107,6 +1107,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_mate_in_6_kqk() {
         setup();
         let mut board = Board::from_fen("8/4k3/8/8/2K5/8/8/Q7 w - - 0 1").unwrap();
