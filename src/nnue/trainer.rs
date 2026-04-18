@@ -350,7 +350,7 @@ pub fn save_weights(w: &TrainableWeights, path: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut f = std::fs::File::create(path)?;
     f.write_all(b"NAGT")?;
-    f.write_all(&3u32.to_le_bytes())?;
+    f.write_all(&super::network::NNUE_FORMAT_VERSION.to_le_bytes())?;
 
     for i in 0..w.ft_w.len() {
         for j in 0..L1_SIZE { f.write_all(&w.ft_w[i][j].to_le_bytes())?; }
@@ -402,7 +402,7 @@ mod tests {
         let path = "/tmp/nagato_test_nn.bin";
         save_weights(&w, path).unwrap();
         let loaded = super::super::network::load_weights_from_file(std::path::Path::new(path)).unwrap();
-        assert_eq!(loaded.version, 3);
+        assert_eq!(loaded.version, super::super::network::NNUE_FORMAT_VERSION);
         for j in 0..L1_SIZE {
             assert!((w.ft_b[j] - loaded.l1_biases[j]).abs() < 1e-6);
         }

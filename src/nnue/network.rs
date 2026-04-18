@@ -11,6 +11,8 @@ use super::simd;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub const NNUE_FORMAT_VERSION: u32 = 4;
+
 pub struct NnueWeights {
     pub version: u32,
     pub l1_weights: Vec<[f32; L1_SIZE]>,
@@ -188,7 +190,7 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
     }
 
     let version = read_u32(&mut cursor, data)?;
-    if version != 1 && version != 2 && version != 3 {
+    if version != 1 && version != 2 && version != 3 && version != 4 {
         return Err(format!("unsupported version: {}", version));
     }
 
@@ -525,12 +527,12 @@ mod tests {
     }
 
     #[test]
-    fn test_weight_file_size_v3() {
+    fn test_weight_file_size_v4() {
         let l1_rows = KING_BUCKETS * PER_BUCKET_FEATURES;
         let ft_floats = l1_rows * L1_SIZE + L1_SIZE + l1_rows * NUM_PSQT_BUCKETS;
         let fc_floats_per_stack = L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1 + SKIP_SIZE;
         let expected_bytes = 8 + (ft_floats + NUM_LAYER_STACKS * fc_floats_per_stack) * 4;
-        assert_eq!(expected_bytes, 6_789_272);
+        assert_eq!(expected_bytes, 8_120_472);
     }
 
     #[test]
@@ -593,19 +595,19 @@ mod tests {
     }
 
     #[test]
-    fn test_load_v3_roundtrip() {
+    fn test_load_v4_roundtrip() {
         let l1_rows = KING_BUCKETS * PER_BUCKET_FEATURES;
         let ft_floats = l1_rows * L1_SIZE + L1_SIZE + l1_rows * NUM_PSQT_BUCKETS;
         let fc_floats_per_stack = L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1 + SKIP_SIZE;
         let total_floats = ft_floats + NUM_LAYER_STACKS * fc_floats_per_stack;
         let mut buf: Vec<u8> = Vec::with_capacity(8 + total_floats * 4);
         buf.extend_from_slice(b"NAGT");
-        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&NNUE_FORMAT_VERSION.to_le_bytes());
         for i in 0..total_floats {
             buf.extend_from_slice(&(i as f32 * 0.0001).to_le_bytes());
         }
-        let w = load_weights_from_bytes(&buf).expect("v3 load failed");
-        assert_eq!(w.version, 3);
+        let w = load_weights_from_bytes(&buf).expect("v4 load failed");
+        assert_eq!(w.version, NNUE_FORMAT_VERSION);
         assert_eq!(w.l1_weights.len(), l1_rows);
         for s in 0..NUM_LAYER_STACKS {
             assert_eq!(w.l2_weights[s].len(), L2_INPUT);
