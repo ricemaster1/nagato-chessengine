@@ -1,0 +1,12 @@
+[package]
+name = "nagato-trainer"
+version = "0.1.0"
+edition = "2021"
+description = "HalfKA NNUE trainer for Nagato (wraps jw1912/bullet)"
+publish = false
+
+[[bin]]
+name = "nagato-trainer"
+path = "src/main.rs"
+
+[dependencies]
