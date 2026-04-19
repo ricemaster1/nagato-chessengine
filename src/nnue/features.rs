@@ -32,8 +32,9 @@ pub const FT_SIZE: usize = KING_BUCKETS * PER_BUCKET_FEATURES;
 #[inline]
 pub fn feature_index_halfka_white(piece: Piece, color: Color, sq: u8, king_sq: u8) -> usize {
     let bucket = king_bucket_of(king_sq);
+    let mirror = if king_sq & 7 >= 4 { 7 } else { 0 };
     let color_offset = match color { Color::White => 0, Color::Black => PER_COLOR_BUCKET };
-    bucket * PER_BUCKET_FEATURES + color_offset + piece.index() * 64 + sq as usize
+    bucket * PER_BUCKET_FEATURES + color_offset + piece.index() * 64 + (sq ^ mirror) as usize
 }
 
 #[inline]
@@ -41,8 +42,9 @@ pub fn feature_index_halfka_black(piece: Piece, color: Color, sq: u8, king_sq: u
     let flipped = sq ^ 56;
     let flipped_king = king_sq ^ 56;
     let bucket = king_bucket_of(flipped_king);
+    let mirror = if flipped_king & 7 >= 4 { 7 } else { 0 };
     let color_offset = match color { Color::Black => 0, Color::White => PER_COLOR_BUCKET };
-    bucket * PER_BUCKET_FEATURES + color_offset + piece.index() * 64 + flipped as usize
+    bucket * PER_BUCKET_FEATURES + color_offset + piece.index() * 64 + (flipped ^ mirror) as usize
 }
 
 pub struct HalfKaFeatures {
