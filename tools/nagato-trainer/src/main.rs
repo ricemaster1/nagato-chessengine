@@ -7,8 +7,12 @@ use bullet_lib::{
         InitSettings, Shape,
         optimiser::{AdamW, AdamWParams},
     },
-    trainer::save::SavedFormat,
-    value::ValueTrainerBuilder,
+    trainer::{
+        save::SavedFormat,
+        schedule::{TrainingSchedule, TrainingSteps, lr, wdl},
+        settings::LocalSettings,
+    },
+    value::{ValueTrainerBuilder, loader::SfBinpackLoader},
 };
 
 const L1_SIZE: usize = 256;
@@ -29,7 +33,29 @@ const BUCKET_LAYOUT: [usize; 32] = [
 
 const NUM_INPUT_BUCKETS: usize = get_num_buckets(&BUCKET_LAYOUT);
 
+const NET_ID: &str = "nagato-halfka-v4";
+const SUPERBATCHES: usize = 800;
+const BATCH_SIZE: usize = 16_384;
+const BATCHES_PER_SB: usize = 6104;
+const INITIAL_LR: f32 = 0.001;
+const WDL_PROPORTION: f32 = 0.75;
+const EVAL_SCALE: f32 = 400.0;
+const SAVE_RATE: usize = 10;
+const THREADS: usize = 4;
+const BINPACK_BUFFER_MB: usize = 2048;
+const BINPACK_WORKERS: usize = 4;
+const OUTPUT_DIR: &str = "checkpoints";
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        eprintln!("usage: nagato-trainer <data.binpack> [more.binpack ...]");
+        std::process::exit(2);
+    }
+    let data_paths: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let final_lr = INITIAL_LR * 0.3f32.powi(5);
+
     let mut trainer = ValueTrainerBuilder::default()
         .dual_perspective()
         .optimiser(AdamW)
@@ -71,7 +97,33 @@ fn main() {
     trainer.optimiser.set_params_for_weight("l0w", stricter);
     trainer.optimiser.set_params_for_weight("l0f", stricter);
 
-    let _ = trainer;
-    eprintln!("nagato-trainer: network defined — training schedule pending (chunk 3)");
-    std::process::exit(1);
+    let schedule = TrainingSchedule {
+        net_id: NET_ID.to_string(),
+        eval_scale: EVAL_SCALE,
+        steps: TrainingSteps {
+            batch_size: BATCH_SIZE,
+            batches_per_superbatch: BATCHES_PER_SB,
+            start_superbatch: 1,
+            end_superbatch: SUPERBATCHES,
+        },
+        wdl_scheduler: wdl::ConstantWDL { value: WDL_PROPORTION },
+        lr_scheduler: lr::CosineDecayLR { initial_lr: INITIAL_LR, final_lr, final_superbatch: SUPERBATCHES },
+        save_rate: SAVE_RATE,
+    };
+
+    let settings = LocalSettings {
+        threads: THREADS,
+        test_set: None,
+        output_directory: OUTPUT_DIR,
+        batch_queue_size: 32,
+    };
+
+    let dataloader = SfBinpackLoader::new_concat_multiple(
+        &data_paths,
+        BINPACK_BUFFER_MB,
+        BINPACK_WORKERS,
+        |_entry| true,
+    );
+
+    trainer.run(&schedule, &settings, &dataloader);
 }

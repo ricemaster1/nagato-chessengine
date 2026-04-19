@@ -184,6 +184,7 @@ name = "nagato-trainer"
 version = "0.1.0"
 dependencies = [
  "bullet_lib",
+ "sfbinpack",
 ]
 
 [[package]]
