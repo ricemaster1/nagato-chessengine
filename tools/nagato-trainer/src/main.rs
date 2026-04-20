@@ -40,9 +40,9 @@ const NUM_INPUT_BUCKETS: usize = get_num_buckets(&BUCKET_LAYOUT);
 const FT_SIZE: usize = 768 * NUM_INPUT_BUCKETS;
 
 const NAGT_MAGIC: &[u8; 4] = b"NAGT";
-const NAGT_VERSION: u32 = 4;
+const NAGT_VERSION: u32 = 5;
 
-const NET_ID: &str = "nagato-halfka-v4";
+const NET_ID: &str = "nagato-halfka-v5";
 const SUPERBATCHES: usize = 800;
 const BATCH_SIZE: usize = 16_384;
 const BATCHES_PER_SB: usize = 6104;
@@ -67,28 +67,6 @@ impl OutputBuckets<ChessBoard> for NagatoMaterialBuckets {
     }
 }
 
-fn halves_perm(out_idx: usize, pair: usize) -> usize {
-    if out_idx < pair { 2 * out_idx } else { 2 * (out_idx - pair) + 1 }
-}
-
-fn permute_halves_rows(src: &[f32], row_size: usize) -> Vec<f32> {
-    let pair = row_size / 2;
-    let rows = src.len() / row_size;
-    let mut out = vec![0.0f32; src.len()];
-    for r in 0..rows {
-        let base = r * row_size;
-        for j in 0..row_size {
-            out[base + j] = src[base + halves_perm(j, pair)];
-        }
-    }
-    out
-}
-
-fn permute_halves_1d(src: Vec<f32>) -> Vec<f32> {
-    let pair = src.len() / 2;
-    (0..src.len()).map(|j| src[halves_perm(j, pair)]).collect()
-}
-
 fn nagt_save_format() -> Vec<SavedFormat> {
     let mut fmt: Vec<SavedFormat> = Vec::new();
 
@@ -101,11 +79,10 @@ fn nagt_save_format() -> Vec<SavedFormat> {
                 let factoriser = store.get("l0f").values.f32().repeat(NUM_INPUT_BUCKETS);
                 weights.into_iter().zip(factoriser).map(|(a, b)| a + b).collect()
             })
-            .transpose()
-            .transform(|_, w| permute_halves_rows(&w, L1_SIZE)),
+            .transpose(),
     );
 
-    fmt.push(SavedFormat::id("l0b").transform(|_, w| permute_halves_1d(w)));
+    fmt.push(SavedFormat::id("l0b"));
 
     fmt.push(SavedFormat::custom(vec![0u8; FT_SIZE * NUM_PSQT_BUCKETS * 4]));
 
