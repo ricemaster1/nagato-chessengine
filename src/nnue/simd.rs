@@ -132,12 +132,13 @@ pub fn output_layer(
     out_weights: &[i16; L2_SIZE],
     out_bias: i32,
 ) -> i64 {
-    let qa = QA;
     let qa_qb = QA * QB;
+    let divisor = (QA as i64) * (QA as i64) * (QB as i64);
     let mut output = out_bias as i64;
     for j in 0..L2_SIZE {
-        let activated = l2_out[j].max(0).min(qa_qb) / qa;
-        output += activated as i64 * out_weights[j] as i64;
+        let clipped = l2_out[j].max(0).min(qa_qb) as i64;
+        let activated = (clipped * clipped) / divisor;
+        output += activated * out_weights[j] as i64;
     }
     output
 }
@@ -348,12 +349,13 @@ pub fn output_layer(
     out_weights: &[i16; L2_SIZE],
     out_bias: i32,
 ) -> i64 {
-    let qa = QA;
     let qa_qb = QA * QB;
+    let divisor = (QA as i64) * (QA as i64) * (QB as i64);
     let mut output = out_bias as i64;
     for j in 0..L2_SIZE {
-        let activated = l2_out[j].max(0).min(qa_qb) / qa;
-        output += activated as i64 * out_weights[j] as i64;
+        let clipped = l2_out[j].max(0).min(qa_qb) as i64;
+        let activated = (clipped * clipped) / divisor;
+        output += activated * out_weights[j] as i64;
     }
     output
 }
@@ -438,12 +440,13 @@ pub fn output_layer(
     out_weights: &[i16; L2_SIZE],
     out_bias: i32,
 ) -> i64 {
-    let qa = QA;
     let qa_qb = QA * QB;
+    let divisor = (QA as i64) * (QA as i64) * (QB as i64);
     let mut output = out_bias as i64;
     for j in 0..L2_SIZE {
-        let activated = l2_out[j].max(0).min(qa_qb) / qa;
-        output += activated as i64 * out_weights[j] as i64;
+        let clipped = l2_out[j].max(0).min(qa_qb) as i64;
+        let activated = (clipped * clipped) / divisor;
+        output += activated * out_weights[j] as i64;
     }
     output
 }

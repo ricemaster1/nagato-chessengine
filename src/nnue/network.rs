@@ -358,7 +358,8 @@ pub fn forward(acc: &Accumulator, side: Color, king_sq_white: u8, king_sq_black:
 
     let mut output = w.output_bias[bucket];
     for j in 0..L2_SIZE {
-        output += clipped_relu(l2_out[j]) * w.output_weights[bucket][j];
+        let act = clipped_relu(l2_out[j]);
+        output += act * act * w.output_weights[bucket][j];
     }
     output += skip_val;
 
@@ -765,8 +766,10 @@ mod tests {
         let stm_pw: i32 = (200u16 as u32 * 200u16 as u32 >> 8) as i32;
         let opp_pw: i32 = (100u16 as u32 * 100u16 as u32 >> 8) as i32;
         let l2_dot = L1_PAIR as i32 * stm_pw * 1 + L1_PAIR as i32 * opp_pw * 1;
-        let l2_crelu = std::cmp::min(l2_dot, QA * QB) / QA;
-        let output_dot = L2_SIZE as i64 * l2_crelu as i64 * 1i64;
+        let clipped = std::cmp::min(l2_dot.max(0), QA * QB) as i64;
+        let divisor = (QA as i64) * (QA as i64) * (QB as i64);
+        let l2_screlu = (clipped * clipped) / divisor;
+        let output_dot = L2_SIZE as i64 * l2_screlu * 1i64;
         let positional = (output_dot * 400 / (QB as i64 * QB as i64)) as i32;
         let expected = (PSQT_BETA as i64 * positional as i64) as i32 / PSQT_GAMMA;
         assert_eq!(result, expected, "result={} expected={}", result, expected);
