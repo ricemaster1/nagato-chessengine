@@ -11,7 +11,7 @@ use super::simd;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const NNUE_FORMAT_VERSION: u32 = 5;
+pub const NNUE_FORMAT_VERSION: u32 = 4;
 
 pub struct NnueWeights {
     pub version: u32,
@@ -190,7 +190,7 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
     }
 
     let version = read_u32(&mut cursor, data)?;
-    if version != 1 && version != 2 && version != 3 && version != 4 && version != 5 {
+    if version != 1 && version != 2 && version != 3 && version != 4 {
         return Err(format!("unsupported version: {}", version));
     }
 
@@ -231,24 +231,6 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
     let mut l1_biases = [0.0f32; L1_SIZE];
     for j in 0..L1_SIZE {
         l1_biases[j] = read_f32(&mut cursor, data)?;
-    }
-
-    if version == 4 {
-        let pair = L1_SIZE / 2;
-        for row in l1_weights.iter_mut() {
-            let mut tmp = [0.0f32; L1_SIZE];
-            for i in 0..pair {
-                tmp[2 * i] = row[i];
-                tmp[2 * i + 1] = row[pair + i];
-            }
-            *row = tmp;
-        }
-        let mut tmp = [0.0f32; L1_SIZE];
-        for i in 0..pair {
-            tmp[2 * i] = l1_biases[i];
-            tmp[2 * i + 1] = l1_biases[pair + i];
-        }
-        l1_biases = tmp;
     }
 
     let mut psqt_weights = vec![[0.0f32; NUM_PSQT_BUCKETS]; l1_rows];
@@ -621,70 +603,18 @@ mod tests {
         let total_floats = ft_floats + NUM_LAYER_STACKS * fc_floats_per_stack;
         let mut buf: Vec<u8> = Vec::with_capacity(8 + total_floats * 4);
         buf.extend_from_slice(b"NAGT");
-        buf.extend_from_slice(&4u32.to_le_bytes());
+        buf.extend_from_slice(&NNUE_FORMAT_VERSION.to_le_bytes());
         for i in 0..total_floats {
             buf.extend_from_slice(&(i as f32 * 0.0001).to_le_bytes());
         }
         let w = load_weights_from_bytes(&buf).expect("v4 load failed");
-        assert_eq!(w.version, 4);
+        assert_eq!(w.version, NNUE_FORMAT_VERSION);
         assert_eq!(w.l1_weights.len(), l1_rows);
         for s in 0..NUM_LAYER_STACKS {
             assert_eq!(w.l2_weights[s].len(), L2_INPUT);
         }
         assert_ne!(w.l2_weights[0][0][0], w.l2_weights[1][0][0]);
         assert_ne!(w.skip_weights[0][0], 0.0);
-    }
-
-    #[test]
-    fn test_load_v4_inverse_permute_halves() {
-        let l1_rows = KING_BUCKETS * PER_BUCKET_FEATURES;
-        let ft_floats = l1_rows * L1_SIZE + L1_SIZE + l1_rows * NUM_PSQT_BUCKETS;
-        let fc_floats_per_stack = L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1 + SKIP_SIZE;
-        let total_floats = ft_floats + NUM_LAYER_STACKS * fc_floats_per_stack;
-        let mut buf: Vec<u8> = Vec::with_capacity(8 + total_floats * 4);
-        buf.extend_from_slice(b"NAGT");
-        buf.extend_from_slice(&4u32.to_le_bytes());
-        for j in 0..L1_SIZE {
-            buf.extend_from_slice(&(j as f32).to_le_bytes());
-        }
-        for _ in L1_SIZE..(l1_rows * L1_SIZE) {
-            buf.extend_from_slice(&0.0f32.to_le_bytes());
-        }
-        for j in 0..L1_SIZE {
-            buf.extend_from_slice(&(j as f32 + 1000.0).to_le_bytes());
-        }
-        let remaining = total_floats - L1_SIZE - (l1_rows * L1_SIZE - L1_SIZE) - L1_SIZE;
-        for _ in 0..remaining {
-            buf.extend_from_slice(&0.0f32.to_le_bytes());
-        }
-        let w = load_weights_from_bytes(&buf).expect("v4 load failed");
-        let pair = L1_SIZE / 2;
-        for i in 0..pair {
-            assert_eq!(w.l1_weights[0][2 * i], i as f32, "row even idx {}", 2 * i);
-            assert_eq!(w.l1_weights[0][2 * i + 1], (pair + i) as f32, "row odd idx {}", 2 * i + 1);
-            assert_eq!(w.l1_biases[2 * i], i as f32 + 1000.0, "bias even idx {}", 2 * i);
-            assert_eq!(w.l1_biases[2 * i + 1], (pair + i) as f32 + 1000.0, "bias odd idx {}", 2 * i + 1);
-        }
-    }
-
-    #[test]
-    fn test_load_v5_roundtrip() {
-        let l1_rows = KING_BUCKETS * PER_BUCKET_FEATURES;
-        let ft_floats = l1_rows * L1_SIZE + L1_SIZE + l1_rows * NUM_PSQT_BUCKETS;
-        let fc_floats_per_stack = L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1 + SKIP_SIZE;
-        let total_floats = ft_floats + NUM_LAYER_STACKS * fc_floats_per_stack;
-        let mut buf: Vec<u8> = Vec::with_capacity(8 + total_floats * 4);
-        buf.extend_from_slice(b"NAGT");
-        buf.extend_from_slice(&NNUE_FORMAT_VERSION.to_le_bytes());
-        for i in 0..total_floats {
-            buf.extend_from_slice(&(i as f32 * 0.0001).to_le_bytes());
-        }
-        let w = load_weights_from_bytes(&buf).expect("v5 load failed");
-        assert_eq!(w.version, NNUE_FORMAT_VERSION);
-        assert_eq!(w.version, 5);
-        assert_eq!(w.l1_weights.len(), l1_rows);
-        assert_eq!(w.l1_weights[0][0], 0.0);
-        assert_eq!(w.l1_weights[0][1], 0.0001);
     }
 
     #[test]
