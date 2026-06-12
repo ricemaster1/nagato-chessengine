@@ -15,6 +15,10 @@ use bullet_lib::{
     },
     value::{ValueTrainerBuilder, loader::SfBinpackLoader},
 };
+use sfbinpack::{
+    TrainingDataEntry,
+    chess::{piece::Piece, r#move::MoveType},
+};
 
 const L1_SIZE: usize = 256;
 const L1_PAIR: usize = L1_SIZE / 2;
@@ -38,6 +42,24 @@ const BUCKET_LAYOUT: [usize; 32] = [
 
 const NUM_INPUT_BUCKETS: usize = get_num_buckets(&BUCKET_LAYOUT);
 const FT_SIZE: usize = 768 * NUM_INPUT_BUCKETS;
+
+const MIN_PLY: u16 = 16;
+const MAX_ABS_SCORE: u16 = 10_000;
+
+fn is_capture(entry: &TrainingDataEntry) -> bool {
+    match entry.mv.mtype() {
+        MoveType::EnPassant => true,
+        MoveType::Castle => false,
+        _ => entry.pos.piece_at(entry.mv.to()) != Piece::none(),
+    }
+}
+
+fn keep_entry(entry: &TrainingDataEntry) -> bool {
+    entry.ply >= MIN_PLY
+        && entry.score.unsigned_abs() <= MAX_ABS_SCORE
+        && !entry.pos.is_checked(entry.pos.side_to_move())
+        && !is_capture(entry)
+}
 
 const NAGT_MAGIC: &[u8; 4] = b"NAGT";
 const NAGT_VERSION: u32 = 4;
@@ -197,7 +219,7 @@ fn main() {
         &data_paths,
         BINPACK_BUFFER_MB,
         BINPACK_WORKERS,
-        |_entry| true,
+        keep_entry,
     );
 
     trainer.run(&schedule, &settings, &dataloader);
