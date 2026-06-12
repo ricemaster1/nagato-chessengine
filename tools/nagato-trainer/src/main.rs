@@ -155,6 +155,10 @@ fn nagt_save_format() -> Vec<SavedFormat> {
     fmt
 }
 
+fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
+    std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
@@ -162,6 +166,15 @@ fn main() {
         std::process::exit(2);
     }
     let data_paths: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let wdl_override = env_parse::<f32>("NAGATO_WDL");
+    let net_id = match wdl_override {
+        Some(w) => format!("{NET_ID}-wdl{:02}", (w * 100.0).round() as u32),
+        None => NET_ID.to_string(),
+    };
+    let wdl = wdl_override.unwrap_or(WDL_PROPORTION);
+    let threads = env_parse::<usize>("NAGATO_THREADS").unwrap_or(THREADS);
+    let workers = env_parse::<usize>("NAGATO_WORKERS").unwrap_or(BINPACK_WORKERS);
 
     let final_lr = INITIAL_LR * 0.3f32.powi(5);
     let fmt = nagt_save_format();
@@ -195,7 +208,7 @@ fn main() {
     trainer.optimiser.set_params_for_weight("l0f", stricter);
 
     let schedule = TrainingSchedule {
-        net_id: NET_ID.to_string(),
+        net_id,
         eval_scale: EVAL_SCALE,
         steps: TrainingSteps {
             batch_size: BATCH_SIZE,
@@ -203,13 +216,13 @@ fn main() {
             start_superbatch: 1,
             end_superbatch: SUPERBATCHES,
         },
-        wdl_scheduler: wdl::ConstantWDL { value: WDL_PROPORTION },
+        wdl_scheduler: wdl::ConstantWDL { value: wdl },
         lr_scheduler: lr::CosineDecayLR { initial_lr: INITIAL_LR, final_lr, final_superbatch: SUPERBATCHES },
         save_rate: SAVE_RATE,
     };
 
     let settings = LocalSettings {
-        threads: THREADS,
+        threads,
         test_set: None,
         output_directory: OUTPUT_DIR,
         batch_queue_size: 32,
@@ -218,7 +231,7 @@ fn main() {
     let dataloader = SfBinpackLoader::new_concat_multiple(
         &data_paths,
         BINPACK_BUFFER_MB,
-        BINPACK_WORKERS,
+        workers,
         keep_entry,
     );
 
