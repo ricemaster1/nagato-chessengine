@@ -345,8 +345,12 @@ fn parse_position(tokens: &[&str], board: &mut Board) {
     if idx < tokens.len() && tokens[idx] == "moves" {
         idx += 1;
         while idx < tokens.len() {
-            if let Some(m) = parse_uci_move(board, tokens[idx]) {
-                board.make_move(m);
+            board.acc_stack_q.clear();
+            let applied = parse_uci_move(board, tokens[idx])
+                .map_or(false, |m| board.make_move(m));
+            if !applied {
+                println!("info string position desync: could not apply move {}", tokens[idx]);
+                let _ = io::stdout().flush();
             }
             idx += 1;
         }
@@ -588,5 +592,19 @@ mod tests {
         let tokens: Vec<&str> = "position startpos moves e2e4 e7e5".split_whitespace().collect();
         parse_position(&tokens, &mut board);
         assert_eq!(board.to_fen(), "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2");
+    }
+
+    #[test]
+    fn test_parse_position_replay_beyond_max_ply() {
+        setup();
+        let mut board = Board::empty();
+        let mut cmd = String::from("position startpos moves");
+        for _ in 0..40 {
+            cmd.push_str(" g1f3 g8f6 f3g1 f6g8");
+        }
+        let tokens: Vec<&str> = cmd.split_whitespace().collect();
+        parse_position(&tokens, &mut board);
+        assert_eq!(board.hash, Board::start_pos().hash);
+        assert_eq!(board.fullmove, 81);
     }
 }
