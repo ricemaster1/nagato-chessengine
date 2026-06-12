@@ -15,5 +15,9 @@ fn main() {
     zobrist::init();
     movegen::init();
     nnue::init();
+    if std::env::args().any(|a| a == "bench") {
+        uci::bench();
+        return;
+    }
     uci::uci_loop();
 }
