@@ -64,17 +64,17 @@ fn keep_entry(entry: &TrainingDataEntry) -> bool {
 const NAGT_MAGIC: &[u8; 4] = b"NAGT";
 const NAGT_VERSION: u32 = 4;
 
-const NET_ID: &str = "nagato-halfka-v4";
-const SUPERBATCHES: usize = 800;
+const NET_ID: &str = "nagato-halfka-v4f";
+const SUPERBATCHES: usize = 600;
 const BATCH_SIZE: usize = 16_384;
 const BATCHES_PER_SB: usize = 6104;
 const INITIAL_LR: f32 = 0.001;
 const WDL_PROPORTION: f32 = 0.75;
 const EVAL_SCALE: f32 = 400.0;
 const SAVE_RATE: usize = 10;
-const THREADS: usize = 4;
+const THREADS: usize = 12;
 const BINPACK_BUFFER_MB: usize = 2048;
-const BINPACK_WORKERS: usize = 4;
+const BINPACK_WORKERS: usize = 12;
 const OUTPUT_DIR: &str = "checkpoints";
 
 #[derive(Clone, Copy, Default)]
