@@ -372,7 +372,7 @@ fn alpha_beta(
     let mut tt_move = MOVE_NONE;
     if let Some(entry) = tt.probe(board.hash) {
         tt_move = entry.best_move;
-        if entry.depth >= depth as i8 {
+        if ply > 0 && entry.depth >= depth as i8 {
             let tt_score = entry.score;
             match entry.flag {
                 TTFlag::Exact => return tt_score,
