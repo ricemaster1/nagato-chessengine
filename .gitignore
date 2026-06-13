@@ -30,6 +30,7 @@ openbench_watchers.lock
 
 # NNUE weights & training data (temp/generated — ignore by default)
 *.bin
+!nn.bin
 *_log.txt
 
 # Temporary test artifacts
