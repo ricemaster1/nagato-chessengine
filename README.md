@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="logo/nagato-dark.png">
+    <img src="logo/nagato.png" alt="Nagato" width="170">
+  </picture>
+</p>
+
 # Nagato
 
 chess engine written in rust
