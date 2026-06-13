@@ -2,7 +2,7 @@ use super::{L1_SIZE, L1_PAIR, L2_SIZE, L2_INPUT, NUM_PSQT_BUCKETS, NUM_LAYER_STA
 use super::network::psqt_bucket;
 use crate::bitboard::*;
 use crate::datagen::{unpack_board, ENTRY_SIZE};
-use super::features::{transform_halfkp, KING_BUCKETS, PER_BUCKET_FEATURES};
+use super::features::{transform_halfka, KING_BUCKETS, PER_BUCKET_FEATURES};
 
 pub const FT_SIZE: usize = KING_BUCKETS * PER_BUCKET_FEATURES;
 
@@ -26,7 +26,7 @@ pub fn parse_entry(data: &[u8]) -> Option<TrainingSample> {
     let wdl_byte = data[38];
 
     let board = unpack_board(&packed, side, castling, ep_file);
-    let transformed = transform_halfkp(&board);
+    let transformed = transform_halfka(&board);
     let white_feats = transformed.white;
     let black_feats = transformed.black;
     let piece_count = white_feats.len() as u32;
@@ -350,7 +350,7 @@ pub fn save_weights(w: &TrainableWeights, path: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut f = std::fs::File::create(path)?;
     f.write_all(b"NAGT")?;
-    f.write_all(&3u32.to_le_bytes())?;
+    f.write_all(&super::network::NNUE_FORMAT_VERSION.to_le_bytes())?;
 
     for i in 0..w.ft_w.len() {
         for j in 0..L1_SIZE { f.write_all(&w.ft_w[i][j].to_le_bytes())?; }
@@ -389,11 +389,11 @@ mod tests {
         let mut buf = Vec::new();
         datagen::write_entry_pub(&mut buf, &board, 25, 2);
         let sample = parse_entry(&buf).unwrap();
-        assert_eq!(sample.white_features.len(), 30);
-        assert_eq!(sample.black_features.len(), 30);
+        assert_eq!(sample.white_features.len(), 32);
+        assert_eq!(sample.black_features.len(), 32);
         assert!((sample.score - 25.0).abs() < 0.01);
         assert!((sample.wdl - 1.0).abs() < 0.01);
-        assert_eq!(sample.piece_count, 30);
+        assert_eq!(sample.piece_count, 32);
     }
 
     #[test]
@@ -402,7 +402,7 @@ mod tests {
         let path = "/tmp/nagato_test_nn.bin";
         save_weights(&w, path).unwrap();
         let loaded = super::super::network::load_weights_from_file(std::path::Path::new(path)).unwrap();
-        assert_eq!(loaded.version, 3);
+        assert_eq!(loaded.version, super::super::network::NNUE_FORMAT_VERSION);
         for j in 0..L1_SIZE {
             assert!((w.ft_b[j] - loaded.l1_biases[j]).abs() < 1e-6);
         }

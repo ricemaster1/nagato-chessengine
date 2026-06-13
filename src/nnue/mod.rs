@@ -75,5 +75,5 @@ pub use accumulator::{
     accumulator_move,
     accumulator_move_q,
 };
-pub use features::{feature_index_white, feature_index_black, king_bucket_of};
-pub use network::{init, is_active, weight_version, evaluate, evaluate_q, forward, forward_q, psqt_bucket};
+pub use features::king_bucket_of;
+pub use network::{NNUE_FORMAT_VERSION, init, is_active, weight_version, evaluate, evaluate_q, forward, forward_q, psqt_bucket};

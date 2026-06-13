@@ -22,6 +22,9 @@ games/
 testing/
 src/bin
 .venv/
+*.md
+!README.md
+.claude/
 
 # NNUE weights & training data (temp/generated — ignore by default)
 *.bin

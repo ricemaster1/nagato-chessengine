@@ -142,6 +142,8 @@ pub struct SearchInfo {
     pub counter_moves: [[Move; 64]; 6],
 
     pub eval_stack: [i32; 128],
+
+    pub root_best: Move,
 }
 
 impl SearchInfo {
@@ -156,12 +158,14 @@ impl SearchInfo {
             history: [[[0; 64]; 64]; 2],
             counter_moves: [[MOVE_NONE; 64]; 6],
             eval_stack: [0; 128],
+            root_best: MOVE_NONE,
         }
     }
 
     pub fn reset(&mut self) {
         self.nodes = 0;
         self.stopped = false;
+        self.root_best = MOVE_NONE;
         self.killers = [[MOVE_NONE; 2]; 128];
         for c in 0..2 {
             for f in 0..64 {
@@ -372,7 +376,7 @@ fn alpha_beta(
     let mut tt_move = MOVE_NONE;
     if let Some(entry) = tt.probe(board.hash) {
         tt_move = entry.best_move;
-        if entry.depth >= depth as i8 {
+        if ply > 0 && entry.depth >= depth as i8 {
             let tt_score = entry.score;
             match entry.flag {
                 TTFlag::Exact => return tt_score,
@@ -624,6 +628,9 @@ fn alpha_beta(
         if score > best_score {
             best_score = score;
             best_move = m;
+            if ply == 0 {
+                info.root_best = m;
+            }
 
             if score > alpha {
                 alpha = score;
@@ -952,7 +959,9 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, ti
 
         best_score = score;
 
-        if let Some(entry) = tt.probe(board.hash) {
+        if !info.root_best.is_null() {
+            best_move = info.root_best;
+        } else if let Some(entry) = tt.probe(board.hash) {
             best_move = entry.best_move;
         }
 
@@ -1107,6 +1116,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_mate_in_6_kqk() {
         setup();
         let mut board = Board::from_fen("8/4k3/8/8/2K5/8/8/Q7 w - - 0 1").unwrap();

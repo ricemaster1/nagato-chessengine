@@ -13,6 +13,11 @@ use std::path::PathBuf;
 const ENGINE_NAME: &str = "Nagato";
 const ENGINE_AUTHOR: &str = "Nagato Team";
 
+pub fn bench() {
+    let mut tt = TranspositionTable::new(64);
+    run_bench(&mut tt);
+}
+
 pub fn uci_loop() {
     let stdin = io::stdin();
     let mut board = Board::start_pos();
