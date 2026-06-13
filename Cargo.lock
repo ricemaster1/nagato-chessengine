@@ -172,7 +172,7 @@ checksum = "4caf9c718f831a8568f030576e6a6e6aa487ed5f8732ddb0ba79e9a3ea0421ca"
 
 [[package]]
 name = "nagato"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "rand 0.8.5",
  "shakmaty",
