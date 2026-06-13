@@ -243,6 +243,9 @@ fn pick_move(list: &mut MoveList, scores: &mut [i32], start: usize) {
 }
 
 fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInfo, _exp: &ExpTable, ply: usize) -> i32 {
+    if board.pieces[board.side.index()][Piece::King.index()] == 0 {
+        return -(MATE_SCORE - ply as i32);
+    }
     if ply >= nnue::MAX_PLY {
         board.ensure_acc_computed();
         return eval::evaluate(board);
@@ -319,6 +322,9 @@ fn alpha_beta(
     do_null: bool,
     prev_move: Move,
 ) -> i32 {
+    if board.pieces[board.side.index()][Piece::King.index()] == 0 {
+        return -(MATE_SCORE - ply as i32);
+    }
     if ply >= nnue::MAX_PLY {
         board.ensure_acc_computed();
         return eval::evaluate(board);
@@ -1100,6 +1106,20 @@ mod tests {
         let exp = ExpTable::new();
         let result = search(&mut board, &mut tt, &exp, 1000, 5);
         assert!(!result.best_move.is_null());
+    }
+
+    #[test]
+    fn test_krvk_no_king_capture_panic() {
+        // KR vs K forces the search through pseudo-legal king-suicide lines whose
+        // refutation "captures" the king; without the king-absent guard at node
+        // entry this panicked in king_sq on the empty king bitboard.
+        setup();
+        let mut board = Board::from_fen("8/8/8/4k3/8/8/3K4/3R4 w - - 0 1").unwrap();
+        let mut tt = TranspositionTable::new(16);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 5000, 14);
+        assert!(!result.best_move.is_null());
+        assert!(result.score > 400, "KRvK should be winning, got {}", result.score);
     }
 
     #[test]
