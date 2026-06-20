@@ -16,6 +16,7 @@ pub struct UndoInfo {
     pub ep_square: Option<u8>,
     pub halfmove: u16,
     pub hash: u64,
+    pub pawn_hash: u64,
     pub captured_piece: Option<Piece>,
     pub nnue_pushed: bool,
 }
@@ -33,6 +34,7 @@ pub struct Board {
     pub fullmove: u16,
 
     pub hash: u64,
+    pub pawn_hash: u64,
 
     pub history: Vec<UndoInfo>,
 
@@ -58,6 +60,7 @@ impl Board {
             halfmove: 0,
             fullmove: 1,
             hash: 0,
+            pawn_hash: 0,
             history: Vec::with_capacity(256),
             accumulator_q: nnue::AccumulatorQ::new(),
             acc_stack_q: nnue::AccStackQ::new(),
@@ -140,6 +143,7 @@ impl Board {
         };
 
         board.hash = board.compute_hash();
+        board.pawn_hash = board.compute_pawn_hash();
 
         if nnue::is_active() {
             let mut acc_q = nnue::AccumulatorQ::new();
@@ -260,6 +264,20 @@ impl Board {
     #[inline]
     pub fn piece_count(&self) -> u32 {
         popcount(self.all_occupancy)
+    }
+
+    pub fn compute_pawn_hash(&self) -> u64 {
+        let keys = zobrist::keys();
+        let p = Piece::Pawn.index();
+        let mut h: u64 = 0;
+        for color in 0..COLOR_COUNT {
+            let mut bb = self.pieces[color][p];
+            while bb != 0 {
+                let sq = pop_lsb(&mut bb);
+                h ^= keys.piece_keys[color][p][sq as usize];
+            }
+        }
+        h
     }
 
     pub fn compute_hash(&self) -> u64 {
@@ -403,6 +421,7 @@ impl Board {
             ep_square: self.ep_square,
             halfmove: self.halfmove,
             hash: self.hash,
+            pawn_hash: self.pawn_hash,
             captured_piece: captured,
             nnue_pushed: nnue_active,
         };
@@ -591,6 +610,10 @@ impl Board {
             return false;
         }
 
+        if piece == Piece::Pawn || captured == Some(Piece::Pawn) {
+            self.pawn_hash = self.compute_pawn_hash();
+        }
+
         true
     }
     pub fn unmake_move(&mut self, m: Move) {
@@ -667,6 +690,7 @@ impl Board {
         self.ep_square = undo.ep_square;
         self.halfmove = undo.halfmove;
         self.hash = undo.hash;
+        self.pawn_hash = undo.pawn_hash;
     }
     pub fn make_null_move(&mut self) {
         let keys = zobrist::keys();
@@ -676,6 +700,7 @@ impl Board {
             ep_square: self.ep_square,
             halfmove: self.halfmove,
             hash: self.hash,
+            pawn_hash: self.pawn_hash,
             captured_piece: None,
             nnue_pushed: false,
         };
@@ -693,6 +718,7 @@ impl Board {
         self.side = self.side.flip();
         self.ep_square = undo.ep_square;
         self.hash = undo.hash;
+        self.pawn_hash = undo.pawn_hash;
     }
     pub fn is_square_attacked(&self, sq: u8, by_color: Color) -> bool {
         use crate::movegen;
@@ -781,5 +807,33 @@ mod tests {
         let h1 = board.hash;
         let h2 = board.compute_hash();
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_pawn_hash_consistency() {
+        crate::zobrist::init();
+        crate::movegen::init();
+        fn walk(board: &mut Board, depth: u32) {
+            assert_eq!(board.pawn_hash, board.compute_pawn_hash(), "incremental pawn_hash diverged");
+            if depth == 0 {
+                return;
+            }
+            let mut list = crate::moves::MoveList::new();
+            crate::movegen::generate_moves(board, &mut list);
+            for i in 0..list.len() {
+                let m = list.moves[i];
+                if board.make_move(m) {
+                    walk(board, depth - 1);
+                    board.unmake_move(m);
+                    assert_eq!(board.pawn_hash, board.compute_pawn_hash(), "pawn_hash not restored by unmake");
+                }
+            }
+        }
+        // Kiwipete — pawn pushes, captures, en passant.
+        let mut b1 = Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1").unwrap();
+        walk(&mut b1, 3);
+        // promotions + promotion-captures.
+        let mut b2 = Board::from_fen("n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1").unwrap();
+        walk(&mut b2, 3);
     }
 }

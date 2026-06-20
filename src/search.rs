@@ -213,21 +213,6 @@ const CORR_GRAIN: i32 = 256;
 #[cfg(feature = "corrhist")]
 const CORR_MAX: i32 = 128 * CORR_GRAIN;
 
-#[cfg(feature = "corrhist")]
-fn pawn_key(board: &Board) -> u64 {
-    let keys = crate::zobrist::keys();
-    let p = Piece::Pawn.index();
-    let mut k = 0u64;
-    for color in 0..2 {
-        let mut bb = board.pieces[color][p];
-        while bb != 0 {
-            let sq = bb.trailing_zeros() as usize;
-            k ^= keys.piece_keys[color][p][sq];
-            bb &= bb - 1;
-        }
-    }
-    k
-}
 
 #[cfg(feature = "corrhist")]
 #[inline]
@@ -348,7 +333,7 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInf
     let stand_pat = eval::evaluate(board);
     #[cfg(feature = "corrhist")]
     let stand_pat = stand_pat
-        + info.corr_hist[board.side.index()][(pawn_key(board) & CORR_MASK) as usize] / CORR_GRAIN;
+        + info.corr_hist[board.side.index()][(board.pawn_hash & CORR_MASK) as usize] / CORR_GRAIN;
 
     if stand_pat >= beta {
         return beta;
@@ -545,7 +530,7 @@ fn alpha_beta(
     #[cfg(feature = "corrhist")]
     let corr_side = board.side.index();
     #[cfg(feature = "corrhist")]
-    let corr_idx = (pawn_key(board) & CORR_MASK) as usize;
+    let corr_idx = (board.pawn_hash & CORR_MASK) as usize;
 
     let static_eval = if !in_check {
         board.ensure_acc_computed();
