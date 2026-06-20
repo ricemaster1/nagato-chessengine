@@ -24,6 +24,7 @@ src/bin
 .venv/
 *.md
 !README.md
+!ACKNOWLEDGEMENTS.md
 .claude/
 
 # NNUE weights & training data (temp/generated — ignore by default)

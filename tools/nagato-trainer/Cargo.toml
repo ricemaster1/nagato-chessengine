@@ -3,6 +3,7 @@ name = "nagato-trainer"
 version = "0.1.0"
 edition = "2021"
 description = "HalfKA NNUE trainer for Nagato (wraps jw1912/bullet)"
+license = "GPL-3.0-or-later"
 publish = false
 
 [[bin]]
