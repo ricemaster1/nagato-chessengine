@@ -346,6 +346,9 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInf
 
     board.ensure_acc_computed();
     let stand_pat = eval::evaluate(board);
+    #[cfg(feature = "corrhist")]
+    let stand_pat = stand_pat
+        + info.corr_hist[board.side.index()][(pawn_key(board) & CORR_MASK) as usize] / CORR_GRAIN;
 
     if stand_pat >= beta {
         return beta;
