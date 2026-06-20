@@ -19,6 +19,11 @@ rand = "0.8"
 shakmaty = "0.30.0"
 shakmaty-syzygy = "0.28.0"
 
+[features]
+# Correction history: blend historical (search - static eval) error into the
+# static eval, keyed by pawn structure + side. Off by default (A/B-tested).
+corrhist = []
+
 [profile.release]
 opt-level = 3
 lto = "fat"

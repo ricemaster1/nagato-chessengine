@@ -151,6 +151,9 @@ pub struct SearchInfo {
     pub eval_stack: [i32; 128],
 
     pub root_best: Move,
+
+    #[cfg(feature = "corrhist")]
+    pub corr_hist: Box<[[i32; CORR_SIZE]; 2]>,
 }
 
 impl SearchInfo {
@@ -166,6 +169,8 @@ impl SearchInfo {
             counter_moves: [[MOVE_NONE; 64]; 6],
             eval_stack: [0; 128],
             root_best: MOVE_NONE,
+            #[cfg(feature = "corrhist")]
+            corr_hist: Box::new([[0; CORR_SIZE]; 2]),
         }
     }
 
@@ -181,6 +186,12 @@ impl SearchInfo {
                 }
             }
         }
+        #[cfg(feature = "corrhist")]
+        for s in 0..2 {
+            for i in 0..CORR_SIZE {
+                self.corr_hist[s][i] /= 2;
+            }
+        }
     }
 
     #[inline]
@@ -191,6 +202,39 @@ impl SearchInfo {
             }
         }
     }
+}
+
+#[cfg(feature = "corrhist")]
+const CORR_SIZE: usize = 16384;
+#[cfg(feature = "corrhist")]
+const CORR_MASK: u64 = CORR_SIZE as u64 - 1;
+#[cfg(feature = "corrhist")]
+const CORR_GRAIN: i32 = 256;
+#[cfg(feature = "corrhist")]
+const CORR_MAX: i32 = 128 * CORR_GRAIN;
+
+#[cfg(feature = "corrhist")]
+fn pawn_key(board: &Board) -> u64 {
+    let keys = crate::zobrist::keys();
+    let p = Piece::Pawn.index();
+    let mut k = 0u64;
+    for color in 0..2 {
+        let mut bb = board.pieces[color][p];
+        while bb != 0 {
+            let sq = bb.trailing_zeros() as usize;
+            k ^= keys.piece_keys[color][p][sq];
+            bb &= bb - 1;
+        }
+    }
+    k
+}
+
+#[cfg(feature = "corrhist")]
+#[inline]
+fn update_corr(info: &mut SearchInfo, side: usize, idx: usize, depth: i32, diff: i32) {
+    let w = (depth + 1).min(16);
+    let entry = &mut info.corr_hist[side][idx];
+    *entry = ((*entry * (256 - w) + diff * CORR_GRAIN * w) / 256).clamp(-CORR_MAX, CORR_MAX);
 }
 
 fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt_move: Move, exp: &ExpTable, prev_move: Move) -> Vec<i32> {
@@ -495,9 +539,17 @@ fn alpha_beta(
         }
     }
 
+    #[cfg(feature = "corrhist")]
+    let corr_side = board.side.index();
+    #[cfg(feature = "corrhist")]
+    let corr_idx = (pawn_key(board) & CORR_MASK) as usize;
+
     let static_eval = if !in_check {
         board.ensure_acc_computed();
-        eval::evaluate(board) + exp_correction
+        let base = eval::evaluate(board) + exp_correction;
+        #[cfg(feature = "corrhist")]
+        let base = base + info.corr_hist[corr_side][corr_idx] / CORR_GRAIN;
+        base
     } else {
         0
     };
@@ -730,6 +782,13 @@ fn alpha_beta(
                         }
                     }
 
+                    #[cfg(feature = "corrhist")]
+                    if !in_check && !best_move.is_capture() && best_score > static_eval
+                        && best_score.abs() < MATE_SCORE - 1024
+                    {
+                        update_corr(info, corr_side, corr_idx, depth, best_score - static_eval);
+                    }
+
                     tt.store(board.hash, depth as i8, beta, TTFlag::Beta, best_move);
                     return beta;
                 }
@@ -743,6 +802,13 @@ fn alpha_beta(
         } else {
             return 0;
         }
+    }
+
+    #[cfg(feature = "corrhist")]
+    if !in_check && !best_move.is_capture() && best_score.abs() < MATE_SCORE - 1024
+        && (flag == TTFlag::Exact || best_score < static_eval)
+    {
+        update_corr(info, corr_side, corr_idx, depth, best_score - static_eval);
     }
 
     tt.store(board.hash, depth as i8, alpha, flag, best_move);
