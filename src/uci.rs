@@ -5,13 +5,17 @@ use crate::eval;
 use crate::learn::{self, ExpTable, GameRecorder};
 use crate::movegen;
 use crate::moves::*;
-use crate::nnue;
 use crate::search::{self, TranspositionTable};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 const ENGINE_NAME: &str = "Nagato";
 const ENGINE_AUTHOR: &str = "Nagato Team";
+
+pub fn bench() {
+    let mut tt = TranspositionTable::new(64);
+    run_bench(&mut tt);
+}
 
 pub fn uci_loop() {
     let stdin = io::stdin();
@@ -189,37 +193,6 @@ pub fn uci_loop() {
                 }
 
                 crate::datagen::generate(num_games, depth, &output, random_plies);
-            }
-            "train" => {
-                let mut input = "training_data.bin".to_string();
-                let mut output = "nn.bin".to_string();
-                let mut epochs = 10u32;
-                let mut batch_size = 16384usize;
-                let mut lr = 0.001f32;
-                let mut lambda = 0.75f32;
-
-                let mut i = 1;
-                while i < tokens.len() {
-                    match tokens[i] {
-                        "input" => { i += 1; if i < tokens.len() { input = tokens[i].to_string(); } }
-                        "output" => { i += 1; if i < tokens.len() { output = tokens[i].to_string(); } }
-                        "epochs" => { i += 1; if i < tokens.len() { epochs = tokens[i].parse().unwrap_or(10); } }
-                        "batch" => { i += 1; if i < tokens.len() { batch_size = tokens[i].parse().unwrap_or(16384); } }
-                        "lr" => { i += 1; if i < tokens.len() { lr = tokens[i].parse().unwrap_or(0.001); } }
-                        "lambda" => { i += 1; if i < tokens.len() { lambda = tokens[i].parse().unwrap_or(0.75); } }
-                        _ => {}
-                    }
-                    i += 1;
-                }
-
-                eprintln!("info string loading training data from {}", input);
-                let samples = nnue::trainer::load_samples(&input);
-                eprintln!("info string loaded {} samples, training...", samples.len());
-                let w = nnue::trainer::train(&samples, epochs, batch_size, lr, lambda);
-                match nnue::trainer::save_weights(&w, &output) {
-                    Ok(_) => eprintln!("info string weights saved to {}", output),
-                    Err(e) => eprintln!("info string save error: {}", e),
-                }
             }
             "setoption" => {
                 parse_setoption(
@@ -523,11 +496,6 @@ fn parse_go(tokens: &[&str], board: &Board) -> (u64, i32) {
     }
 
     (time_ms, depth)
-}
-
-pub fn bench() {
-    let mut tt = TranspositionTable::new(64);
-    run_bench(&mut tt);
 }
 
 fn run_bench(tt: &mut TranspositionTable) {

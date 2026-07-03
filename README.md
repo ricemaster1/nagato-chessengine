@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="logo/nagato-dark.png">
+    <img src="logo/nagato.png" alt="Nagato" width="170">
+  </picture>
+</p>
+
 # Nagato
 
 chess engine written in rust
@@ -46,3 +53,13 @@ then type `uci` and go from there
 ## why "nagato"
 
 named after the IJN Nagato, lead ship of the Nagato-class battleships of the Imperial Japanese Navy
+
+## license
+
+Nagato is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. it is distributed WITHOUT ANY WARRANTY. see [LICENSE](LICENSE) for the full text.
+
+the GPL applies because the engine links the GPL-licensed `shakmaty` and `shakmaty-syzygy` crates.
+
+## acknowledgements
+
+nagato builds on the work of others — bullet, shakmaty, the Syzygy tablebases, NNUE, OpenBench, Cute Chess, and the wider computer-chess community. see [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md) for the full list.

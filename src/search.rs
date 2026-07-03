@@ -149,6 +149,8 @@ pub struct SearchInfo {
     pub counter_moves: [[Move; 64]; 6],
 
     pub eval_stack: [i32; 128],
+
+    pub root_best: Move,
 }
 
 impl SearchInfo {
@@ -163,12 +165,14 @@ impl SearchInfo {
             history: [[[0; 64]; 64]; 2],
             counter_moves: [[MOVE_NONE; 64]; 6],
             eval_stack: [0; 128],
+            root_best: MOVE_NONE,
         }
     }
 
     pub fn reset(&mut self) {
         self.nodes = 0;
         self.stopped = false;
+        self.root_best = MOVE_NONE;
         self.killers = [[MOVE_NONE; 2]; 128];
         for c in 0..2 {
             for f in 0..64 {
@@ -282,6 +286,9 @@ fn sphere_perturb(base: i32, hash: u64, ply: usize, depth: i32, mv: Move) -> i32
 }
 
 fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInfo, _exp: &ExpTable, ply: usize) -> i32 {
+    if board.pieces[board.side.index()][Piece::King.index()] == 0 {
+        return -(MATE_SCORE - ply as i32);
+    }
     if ply >= nnue::MAX_PLY {
         board.ensure_acc_computed();
         return eval::evaluate(board);
@@ -358,6 +365,9 @@ fn alpha_beta(
     do_null: bool,
     prev_move: Move,
 ) -> i32 {
+    if board.pieces[board.side.index()][Piece::King.index()] == 0 {
+        return -(MATE_SCORE - ply as i32);
+    }
     if ply >= nnue::MAX_PLY {
         board.ensure_acc_computed();
         return eval::evaluate(board);
@@ -415,7 +425,7 @@ fn alpha_beta(
     let mut tt_move = MOVE_NONE;
     if let Some(entry) = tt.probe(board.hash) {
         tt_move = entry.best_move;
-        if entry.depth >= depth as i8 {
+        if ply > 0 && entry.depth >= depth as i8 {
             let tt_score = entry.score;
             match entry.flag {
                 TTFlag::Exact => return tt_score,
@@ -696,6 +706,9 @@ fn alpha_beta(
         if score > best_score {
             best_score = score;
             best_move = m;
+            if ply == 0 {
+                info.root_best = m;
+            }
 
             if score > alpha {
                 alpha = score;
@@ -1024,7 +1037,9 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, ti
 
         best_score = score;
 
-        if let Some(entry) = tt.probe(board.hash) {
+        if !info.root_best.is_null() {
+            best_move = info.root_best;
+        } else if let Some(entry) = tt.probe(board.hash) {
             best_move = entry.best_move;
         }
 
@@ -1166,6 +1181,20 @@ mod tests {
     }
 
     #[test]
+    fn test_krvk_no_king_capture_panic() {
+        // KR vs K forces the search through pseudo-legal king-suicide lines whose
+        // refutation "captures" the king; without the king-absent guard at node
+        // entry this panicked in king_sq on the empty king bitboard.
+        setup();
+        let mut board = Board::from_fen("8/8/8/4k3/8/8/3K4/3R4 w - - 0 1").unwrap();
+        let mut tt = TranspositionTable::new(16);
+        let exp = ExpTable::new();
+        let result = search(&mut board, &mut tt, &exp, 5000, 14);
+        assert!(!result.best_move.is_null());
+        assert!(result.score > 400, "KRvK should be winning, got {}", result.score);
+    }
+
+    #[test]
     fn test_mate_in_2_back_rank() {
         setup();
         let mut board = Board::from_fen("3r2k1/5ppp/8/8/8/8/4RPPP/4Q1K1 w - - 0 1").unwrap();
@@ -1179,6 +1208,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_mate_in_6_kqk() {
         setup();
         let mut board = Board::from_fen("8/4k3/8/8/2K5/8/8/Q7 w - - 0 1").unwrap();

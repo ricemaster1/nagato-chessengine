@@ -23,7 +23,9 @@ games/
 testing/
 src/bin
 .venv/
-CLAUDE.local.md
+*.md
+!README.md
+!ACKNOWLEDGEMENTS.md
 
 # OpenBench runtime
 openbench_watchers.lock

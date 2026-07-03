@@ -2,7 +2,6 @@ pub mod features;
 pub mod accumulator;
 pub mod network;
 pub mod simd;
-pub mod trainer;
 
 pub const L1_SIZE: usize = 256;
 pub const L1_PAIR: usize = L1_SIZE / 2;
@@ -57,23 +56,18 @@ impl ArchConfig {
 
 pub use accumulator::{
     MAX_PLY,
-    Accumulator,
     AccumulatorQ,
     AccStackQ,
     DirtyPiece,
     SQ_NONE,
     FinnyCache,
-    refresh_accumulator,
     refresh_accumulator_q,
     refresh_half_q,
     finny_update_half,
     apply_dirty_half_q,
-    accumulator_add,
     accumulator_add_q,
-    accumulator_remove,
     accumulator_remove_q,
-    accumulator_move,
     accumulator_move_q,
 };
-pub use features::{feature_index_white, feature_index_black, king_bucket_of};
-pub use network::{init, is_active, weight_version, evaluate, evaluate_q, forward, forward_q, psqt_bucket};
+pub use features::king_bucket_of;
+pub use network::{init, is_active, weight_version, evaluate_q};

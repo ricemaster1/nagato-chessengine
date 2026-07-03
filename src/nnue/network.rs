@@ -11,6 +11,8 @@ use super::simd;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub const NNUE_FORMAT_VERSION: u32 = 4;
+
 pub struct NnueWeights {
     pub version: u32,
     pub l1_weights: Vec<[f32; L1_SIZE]>,
@@ -188,7 +190,7 @@ pub fn load_weights_from_bytes(data: &[u8]) -> Result<NnueWeights, String> {
     }
 
     let version = read_u32(&mut cursor, data)?;
-    if version != 1 && version != 2 && version != 3 {
+    if version != 1 && version != 2 && version != 3 && version != 4 {
         return Err(format!("unsupported version: {}", version));
     }
 
@@ -356,7 +358,8 @@ pub fn forward(acc: &Accumulator, side: Color, king_sq_white: u8, king_sq_black:
 
     let mut output = w.output_bias[bucket];
     for j in 0..L2_SIZE {
-        output += clipped_relu(l2_out[j]) * w.output_weights[bucket][j];
+        let act = clipped_relu(l2_out[j]);
+        output += act * act * w.output_weights[bucket][j];
     }
     output += skip_val;
 
@@ -525,12 +528,12 @@ mod tests {
     }
 
     #[test]
-    fn test_weight_file_size_v3() {
+    fn test_weight_file_size_v4() {
         let l1_rows = KING_BUCKETS * PER_BUCKET_FEATURES;
         let ft_floats = l1_rows * L1_SIZE + L1_SIZE + l1_rows * NUM_PSQT_BUCKETS;
         let fc_floats_per_stack = L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1 + SKIP_SIZE;
         let expected_bytes = 8 + (ft_floats + NUM_LAYER_STACKS * fc_floats_per_stack) * 4;
-        assert_eq!(expected_bytes, 6_789_272);
+        assert_eq!(expected_bytes, 8_120_472);
     }
 
     #[test]
@@ -593,19 +596,19 @@ mod tests {
     }
 
     #[test]
-    fn test_load_v3_roundtrip() {
+    fn test_load_v4_roundtrip() {
         let l1_rows = KING_BUCKETS * PER_BUCKET_FEATURES;
         let ft_floats = l1_rows * L1_SIZE + L1_SIZE + l1_rows * NUM_PSQT_BUCKETS;
         let fc_floats_per_stack = L2_INPUT * L2_SIZE + L2_SIZE + L2_SIZE + 1 + SKIP_SIZE;
         let total_floats = ft_floats + NUM_LAYER_STACKS * fc_floats_per_stack;
         let mut buf: Vec<u8> = Vec::with_capacity(8 + total_floats * 4);
         buf.extend_from_slice(b"NAGT");
-        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&NNUE_FORMAT_VERSION.to_le_bytes());
         for i in 0..total_floats {
             buf.extend_from_slice(&(i as f32 * 0.0001).to_le_bytes());
         }
-        let w = load_weights_from_bytes(&buf).expect("v3 load failed");
-        assert_eq!(w.version, 3);
+        let w = load_weights_from_bytes(&buf).expect("v4 load failed");
+        assert_eq!(w.version, NNUE_FORMAT_VERSION);
         assert_eq!(w.l1_weights.len(), l1_rows);
         for s in 0..NUM_LAYER_STACKS {
             assert_eq!(w.l2_weights[s].len(), L2_INPUT);
@@ -763,8 +766,10 @@ mod tests {
         let stm_pw: i32 = (200u16 as u32 * 200u16 as u32 >> 8) as i32;
         let opp_pw: i32 = (100u16 as u32 * 100u16 as u32 >> 8) as i32;
         let l2_dot = L1_PAIR as i32 * stm_pw * 1 + L1_PAIR as i32 * opp_pw * 1;
-        let l2_crelu = std::cmp::min(l2_dot, QA * QB) / QA;
-        let output_dot = L2_SIZE as i64 * l2_crelu as i64 * 1i64;
+        let clipped = std::cmp::min(l2_dot.max(0), QA * QB) as i64;
+        let divisor = (QA as i64) * (QA as i64) * (QB as i64);
+        let l2_screlu = (clipped * clipped) / divisor;
+        let output_dot = L2_SIZE as i64 * l2_screlu * 1i64;
         let positional = (output_dot * 400 / (QB as i64 * QB as i64)) as i32;
         let expected = (PSQT_BETA as i64 * positional as i64) as i32 / PSQT_GAMMA;
         assert_eq!(result, expected, "result={} expected={}", result, expected);

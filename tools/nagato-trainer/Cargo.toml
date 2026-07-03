@@ -1,0 +1,19 @@
+[package]
+name = "nagato-trainer"
+version = "0.1.0"
+edition = "2021"
+description = "HalfKA NNUE trainer for Nagato (wraps jw1912/bullet)"
+license = "GPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "nagato-trainer"
+path = "src/main.rs"
+
+[features]
+cuda = ["bullet_lib/cuda"]
+rocm = ["bullet_lib/rocm"]
+
+[dependencies]
+bullet_lib = { git = "https://github.com/jw1912/bullet", rev = "571f1a693a37105944ca36ab4b48e998c5f52c28" }
+sfbinpack = "0.6"
