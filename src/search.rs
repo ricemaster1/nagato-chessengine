@@ -30,6 +30,99 @@ const SPHERE_QUIET_THRESHOLD: usize = 4;
 #[cfg(feature = "sphere-search")]
 const SPHERE_MAX_DEPTH: i32 = 6;
 
+#[cfg(feature = "sphere2-probe")]
+mod probe {
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
+    use std::sync::{Mutex, OnceLock};
+
+    pub struct Rec {
+        pub turb: i32,
+        pub exp_miss: i32,
+        pub tail_n: i32,
+        pub tail_novel: i32,
+        pub novel_moves: [u32; 8],
+        pub lmp_pruned: i32,
+        pub lmp_novel: i32,
+        pub fut_pruned: i32,
+        pub fut_novel: i32,
+        pub bucket: i32,
+        pub researched: i32,
+        pub best_idx: i32,
+    }
+
+    static OUT: OnceLock<Mutex<BufWriter<File>>> = OnceLock::new();
+    static SAMPLE: OnceLock<u64> = OnceLock::new();
+    static PROJ: OnceLock<Box<[[i8; 256]; 12]>> = OnceLock::new();
+
+    fn out() -> &'static Mutex<BufWriter<File>> {
+        OUT.get_or_init(|| {
+            let path = std::env::var("NAGATO_SPHERE2_LOG").unwrap_or_else(|_| "sphere2_probe.csv".into());
+            let mut w = BufWriter::new(File::create(path).expect("sphere2 probe log"));
+            writeln!(w, "kind,depth,ply,pieces,in_check,static_eval,turb,exp_miss,tail_n,tail_novel,lmp_pruned,lmp_novel,fut_pruned,fut_novel,bucket,best,surprise,researched,best_idx,exit,mv").ok();
+            Mutex::new(w)
+        })
+    }
+
+    pub fn sample() -> u64 {
+        *SAMPLE.get_or_init(|| {
+            std::env::var("NAGATO_SPHERE2_SAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(16)
+        })
+    }
+
+    fn proj() -> &'static [[i8; 256]; 12] {
+        PROJ.get_or_init(|| {
+            let mut t = Box::new([[0i8; 256]; 12]);
+            let mut s: u64 = 0x9e37_79b9_7f4a_7c15;
+            for row in t.iter_mut() {
+                for v in row.iter_mut() {
+                    s ^= s >> 30;
+                    s = s.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                    s ^= s >> 27;
+                    s = s.wrapping_mul(0x94d0_49bb_1331_11eb);
+                    s ^= s >> 31;
+                    *v = if s & 1 == 1 { 1 } else { -1 };
+                }
+            }
+            t
+        })
+    }
+
+    pub fn simhash12(acc: &[i16; 256]) -> i32 {
+        let p = proj();
+        let mut bits = 0i32;
+        for (k, row) in p.iter().enumerate() {
+            let mut dot = 0i64;
+            for (i, &w) in row.iter().enumerate() {
+                dot += w as i64 * acc[i] as i64;
+            }
+            if dot > 0 {
+                bits |= 1 << k;
+            }
+        }
+        bits
+    }
+
+    pub fn emit(r: &Rec, depth: i32, ply: usize, pieces: u32, in_check: bool, static_eval: i32, best: i32, exit: char) {
+        let surprise = if in_check { -1 } else { (best - static_eval).abs() };
+        let mut w = out().lock().unwrap();
+        writeln!(
+            w,
+            "n,{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},",
+            depth, ply, pieces, in_check as i32, static_eval, r.turb, r.exp_miss,
+            r.tail_n, r.tail_novel, r.lmp_pruned, r.lmp_novel, r.fut_pruned, r.fut_novel,
+            r.bucket, best, surprise, r.researched, r.best_idx, exit
+        ).ok();
+        let _ = w.flush();
+    }
+
+    pub fn emit_root(depth: i32, score: i32, mv: String) {
+        let mut w = out().lock().unwrap();
+        writeln!(w, "r,{depth},0,0,0,0,-1,-1,0,0,0,0,0,0,-1,{score},-1,0,-1,r,{mv}").ok();
+        let _ = w.flush();
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TTFlag {
     None,
@@ -610,6 +703,7 @@ fn alpha_beta(
 
     let mut scores = score_moves(&list, board, info, ply, tt_move, exp, prev_move);
 
+<<<<<<< HEAD
     #[cfg(feature = "sphere-search")]
     if ply >= 1 && depth <= SPHERE_MAX_DEPTH && board.all_occupancy.count_ones() > 5 {
         let mut in_tail = [false; 256];
@@ -639,6 +733,75 @@ fn alpha_beta(
         }
     }
 
+    #[cfg(feature = "sphere2-probe")]
+    let mut prb: Option<probe::Rec> = if ply >= 1 && depth >= 1 && depth <= 8 && board.hash % probe::sample() == 0 {
+        let turb = if !in_check && ply >= 4 {
+            (info.eval_stack[ply] - info.eval_stack[ply - 2]).abs()
+                + (info.eval_stack[ply - 2] - info.eval_stack[ply - 4]).abs()
+        } else {
+            -1
+        };
+        let exp_miss = exp.probe(board.hash).is_none() as i32;
+        let keys = crate::zobrist::keys();
+        let us = board.side.index();
+        let mut tail_n = 0i32;
+        let mut tail_novel = 0i32;
+        let mut novel_moves = [0u32; 8];
+        for i in 0..list.len() {
+            if tail_n >= 8 {
+                break;
+            }
+            let m = list.moves[i];
+            if m.is_capture() || m.is_promotion() || m.is_en_passant() || scores[i] >= 650_000 {
+                continue;
+            }
+            let pc = m.piece();
+            if pc == Piece::King || (pc == Piece::Rook && board.castling != 0) || m.flags() == FLAG_DOUBLE_PAWN {
+                continue;
+            }
+            let mut child = board.hash
+                ^ keys.piece_keys[us][pc.index()][m.from_sq() as usize]
+                ^ keys.piece_keys[us][pc.index()][m.to_sq() as usize]
+                ^ keys.side_key;
+            if let Some(ep) = board.ep_square {
+                child ^= keys.ep_keys[(ep & 7) as usize];
+            }
+            let covered = tt.probe(child).is_some_and(|e| e.generation == tt.generation);
+            if !covered {
+                novel_moves[tail_novel as usize] = m.0;
+                tail_novel += 1;
+            }
+            tail_n += 1;
+        }
+        let bucket = if !in_check && nnue::is_active() {
+            board.ensure_acc_computed();
+            let acc = &board.accumulator_q;
+            let view = match board.side {
+                Color::White => &acc.white[nnue::king_bucket_of(board.king_sq(Color::White))],
+                Color::Black => &acc.black[nnue::king_bucket_of(board.king_sq(Color::Black) ^ 56)],
+            };
+            probe::simhash12(view)
+        } else {
+            -1
+        };
+        Some(probe::Rec {
+            turb,
+            exp_miss,
+            tail_n,
+            tail_novel,
+            novel_moves,
+            lmp_pruned: 0,
+            lmp_novel: 0,
+            fut_pruned: 0,
+            fut_novel: 0,
+            bucket,
+            researched: 0,
+            best_idx: -1,
+        })
+    } else {
+        None
+    };
+
     let mut best_move = MOVE_NONE;
     let mut best_score = -INFINITY;
     let mut moves_searched = 0;
@@ -656,6 +819,13 @@ fn alpha_beta(
             if depth <= LMP_DEPTH_MAX {
                 let lmp_limit = LMP_BASE + LMP_STEP * (depth as usize);
                 if moves_searched >= lmp_limit {
+                    #[cfg(feature = "sphere2-probe")]
+                    if let Some(p) = prb.as_mut() {
+                        p.lmp_pruned += 1;
+                        if p.novel_moves[..p.tail_novel as usize].contains(&m.0) {
+                            p.lmp_novel += 1;
+                        }
+                    }
                     continue;
                 }
             }
@@ -666,6 +836,13 @@ fn alpha_beta(
                     futility_margin -= FUTILITY_IMPROVING_BONUS;
                 }
                 if static_eval + futility_margin <= alpha {
+                    #[cfg(feature = "sphere2-probe")]
+                    if let Some(p) = prb.as_mut() {
+                        p.fut_pruned += 1;
+                        if p.novel_moves[..p.tail_novel as usize].contains(&m.0) {
+                            p.fut_novel += 1;
+                        }
+                    }
                     continue;
                 }
             }
@@ -729,6 +906,12 @@ fn alpha_beta(
         }
 
         if score > alpha {
+            #[cfg(feature = "sphere2-probe")]
+            if moves_searched > 0 {
+                if let Some(p) = prb.as_mut() {
+                    p.researched += 1;
+                }
+            }
             score = -alpha_beta(board, tt, info, exp, depth - 1, -beta, -alpha, ply + 1, true, m);
         }
 
@@ -746,6 +929,10 @@ fn alpha_beta(
         if score > best_score {
             best_score = score;
             best_move = m;
+            #[cfg(feature = "sphere2-probe")]
+            if let Some(p) = prb.as_mut() {
+                p.best_idx = (moves_searched - 1) as i32;
+            }
             if ply == 0 {
                 info.root_best = m;
             }
@@ -778,6 +965,10 @@ fn alpha_beta(
                     }
 
                     tt.store(board.hash, depth as i8, beta, TTFlag::Beta, best_move);
+                    #[cfg(feature = "sphere2-probe")]
+                    if let Some(p) = prb.as_ref() {
+                        probe::emit(p, depth, ply, board.all_occupancy.count_ones(), in_check, static_eval, score, 'b');
+                    }
                     return beta;
                 }
             }
@@ -800,6 +991,10 @@ fn alpha_beta(
     }
 
     tt.store(board.hash, depth as i8, alpha, flag, best_move);
+    #[cfg(feature = "sphere2-probe")]
+    if let Some(p) = prb.as_ref() {
+        probe::emit(p, depth, ply, board.all_occupancy.count_ones(), in_check, static_eval, best_score, 'f');
+    }
     alpha
 }
 
@@ -1083,6 +1278,11 @@ pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, ti
             } else {
                 break;
             }
+        }
+
+        #[cfg(feature = "sphere2-probe")]
+        if !info.stopped {
+            probe::emit_root(depth, score, format!("{}", info.root_best));
         }
 
         if info.stopped && depth > 1 {
