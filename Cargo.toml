@@ -9,6 +9,11 @@ edition = "2021"
 description = "Nagato — a chess engine forged in Rust, named after the IJN Nagato"
 license = "GPL-3.0-or-later"
 
+[features]
+default = ["kbnk-scaling"]
+kbnk-scaling = []
+sphere-search = []
+
 [dependencies]
 rand = "0.8"
 shakmaty = "0.30.0"

@@ -2,6 +2,7 @@
 target/
 
 # IDE / Editor
+.claude/
 .vscode/
 .github/
 .idea/
@@ -25,12 +26,13 @@ src/bin
 *.md
 !README.md
 !ACKNOWLEDGEMENTS.md
-.claude/
+
+# OpenBench runtime
+openbench_watchers.lock
 
 # NNUE weights & training data (temp/generated — ignore by default)
 *.bin
 !nn.bin
-!training/data/*.bin
 *_log.txt
 
 # Temporary test artifacts
@@ -44,6 +46,5 @@ nn_validate.bin
 
 # Experience data
 *.exp
-!nagato.exp
 
 sync-to-ubuntu.sh

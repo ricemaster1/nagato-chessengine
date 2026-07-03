@@ -1,15 +1,14 @@
 pub mod hce;
 pub mod see;
 pub mod pst;
-pub mod endgame;
 
 pub use hce::*;
 pub use see::*;
 pub use pst::*;
-pub use endgame::*;
 
 use crate::bitboard::*;
 use crate::board::Board;
+use crate::endgame::evaluate_endgame;
 use crate::movegen;
 use crate::moves::Move;
 use crate::nnue;
@@ -55,7 +54,6 @@ pub fn material_balance(board: &Board) -> i32 {
 }
 
 pub fn evaluate(board: &Board) -> i32 {
-    // Intercept specific endgames (like KBNvK) before standard evaluation
     if let Some(endgame_score) = evaluate_endgame(board) {
         return match board.side {
             Color::White => endgame_score,
