@@ -10,19 +10,17 @@ description = "Nagato — a chess engine forged in Rust, named after the IJN Nag
 license = "GPL-3.0-or-later"
 
 [features]
-default = ["kbnk-scaling"]
+default = ["kbnk-scaling", "corrhist"]
 kbnk-scaling = []
 sphere-search = []
+# Correction history: blend historical (search - static eval) error into the
+# static eval, keyed by pawn structure + side. Default on (SPRT +10.4 +/- 7.7).
+corrhist = []
 
 [dependencies]
 rand = "0.8"
 shakmaty = "0.30.0"
 shakmaty-syzygy = "0.28.0"
-
-[features]
-# Correction history: blend historical (search - static eval) error into the
-# static eval, keyed by pawn structure + side. Off by default (A/B-tested).
-corrhist = []
 
 [profile.release]
 opt-level = 3
