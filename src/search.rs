@@ -30,46 +30,26 @@ const SPHERE_QUIET_THRESHOLD: usize = 4;
 #[cfg(feature = "sphere-search")]
 const SPHERE_MAX_DEPTH: i32 = 6;
 
-#[cfg(feature = "sphere2-probe")]
-mod probe {
-    use std::fs::File;
-    use std::io::{BufWriter, Write};
-    use std::sync::{Mutex, OnceLock};
+#[cfg(feature = "sphere2-s4")]
+const S4_SIZE: usize = 4096;
+#[cfg(feature = "sphere2-s4")]
+const S4_GRAIN: i32 = 16;
+#[cfg(feature = "sphere2-s4")]
+const S4_NEUTRAL: i32 = 80 * S4_GRAIN;
+#[cfg(feature = "sphere2-s4")]
+const S4_HOT: i32 = 120 * S4_GRAIN;
+#[cfg(feature = "sphere2-s4")]
+const S4_COLD: i32 = 40 * S4_GRAIN;
+#[cfg(feature = "sphere2-s4")]
+const S4_MIN_N: u32 = 32;
+#[cfg(feature = "sphere2-s4")]
+const S4_MIN_DEPTH: i32 = 3;
 
-    pub struct Rec {
-        pub turb: i32,
-        pub exp_miss: i32,
-        pub tail_n: i32,
-        pub tail_novel: i32,
-        pub novel_moves: [u32; 64],
-        pub lmp_pruned: i32,
-        pub lmp_novel: i32,
-        pub fut_pruned: i32,
-        pub fut_novel: i32,
-        pub bucket: i32,
-        pub bucket2: i32,
-        pub researched: i32,
-        pub best_idx: i32,
-    }
+#[cfg(any(feature = "sphere2-probe", feature = "sphere2-s4"))]
+mod sketch {
+    use std::sync::OnceLock;
 
-    static OUT: OnceLock<Mutex<BufWriter<File>>> = OnceLock::new();
-    static SAMPLE: OnceLock<u64> = OnceLock::new();
     static PROJ: OnceLock<Box<[[i8; 256]; 12]>> = OnceLock::new();
-
-    fn out() -> &'static Mutex<BufWriter<File>> {
-        OUT.get_or_init(|| {
-            let path = std::env::var("NAGATO_SPHERE2_LOG").unwrap_or_else(|_| "sphere2_probe.csv".into());
-            let mut w = BufWriter::new(File::create(path).expect("sphere2 probe log"));
-            writeln!(w, "kind,depth,ply,pieces,in_check,static_eval,turb,exp_miss,tail_n,tail_novel,lmp_pruned,lmp_novel,fut_pruned,fut_novel,bucket,bucket2,best,surprise,researched,best_idx,exit,mv").ok();
-            Mutex::new(w)
-        })
-    }
-
-    pub fn sample() -> u64 {
-        *SAMPLE.get_or_init(|| {
-            std::env::var("NAGATO_SPHERE2_SAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(16)
-        })
-    }
 
     fn proj() -> &'static [[i8; 256]; 12] {
         PROJ.get_or_init(|| {
@@ -119,6 +99,47 @@ mod probe {
             }
         }
         bits
+    }
+}
+
+#[cfg(feature = "sphere2-probe")]
+mod probe {
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
+    use std::sync::{Mutex, OnceLock};
+
+    pub struct Rec {
+        pub turb: i32,
+        pub exp_miss: i32,
+        pub tail_n: i32,
+        pub tail_novel: i32,
+        pub novel_moves: [u32; 64],
+        pub lmp_pruned: i32,
+        pub lmp_novel: i32,
+        pub fut_pruned: i32,
+        pub fut_novel: i32,
+        pub bucket: i32,
+        pub bucket2: i32,
+        pub researched: i32,
+        pub best_idx: i32,
+    }
+
+    static OUT: OnceLock<Mutex<BufWriter<File>>> = OnceLock::new();
+    static SAMPLE: OnceLock<u64> = OnceLock::new();
+
+    fn out() -> &'static Mutex<BufWriter<File>> {
+        OUT.get_or_init(|| {
+            let path = std::env::var("NAGATO_SPHERE2_LOG").unwrap_or_else(|_| "sphere2_probe.csv".into());
+            let mut w = BufWriter::new(File::create(path).expect("sphere2 probe log"));
+            writeln!(w, "kind,depth,ply,pieces,in_check,static_eval,turb,exp_miss,tail_n,tail_novel,lmp_pruned,lmp_novel,fut_pruned,fut_novel,bucket,bucket2,best,surprise,researched,best_idx,exit,mv").ok();
+            Mutex::new(w)
+        })
+    }
+
+    pub fn sample() -> u64 {
+        *SAMPLE.get_or_init(|| {
+            std::env::var("NAGATO_SPHERE2_SAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(16)
+        })
     }
 
     pub fn emit(r: &Rec, depth: i32, ply: usize, pieces: u32, in_check: bool, static_eval: i32, best: i32, exit: char) {
@@ -174,6 +195,10 @@ pub struct TranspositionTable {
     buckets: Vec<[TTEntry; TT_BUCKET_SIZE]>,
     num_buckets: usize,
     pub generation: u8,
+    #[cfg(feature = "sphere2-s4")]
+    pub s4_field: Box<[i32]>,
+    #[cfg(feature = "sphere2-s4")]
+    pub s4_n: Box<[u32]>,
 }
 
 impl TranspositionTable {
@@ -184,6 +209,10 @@ impl TranspositionTable {
             buckets: vec![[TTEntry::EMPTY; TT_BUCKET_SIZE]; num_buckets],
             num_buckets,
             generation: 0,
+            #[cfg(feature = "sphere2-s4")]
+            s4_field: vec![S4_NEUTRAL; S4_SIZE].into_boxed_slice(),
+            #[cfg(feature = "sphere2-s4")]
+            s4_n: vec![0u32; S4_SIZE].into_boxed_slice(),
         }
     }
 
@@ -243,6 +272,11 @@ impl TranspositionTable {
         for bucket in self.buckets.iter_mut() {
             *bucket = [TTEntry::EMPTY; TT_BUCKET_SIZE];
         }
+        #[cfg(feature = "sphere2-s4")]
+        {
+            self.s4_field.fill(S4_NEUTRAL);
+            self.s4_n.fill(0);
+        }
     }
 }
 
@@ -260,6 +294,9 @@ pub struct SearchInfo {
     pub counter_moves: [[Move; 64]; 6],
 
     pub eval_stack: [i32; 128],
+
+    #[cfg(feature = "sphere2-s4")]
+    pub s4_rstack: [i8; 128],
 
     pub root_best: Move,
 
@@ -279,6 +316,8 @@ impl SearchInfo {
             history: [[[0; 64]; 64]; 2],
             counter_moves: [[MOVE_NONE; 64]; 6],
             eval_stack: [0; 128],
+            #[cfg(feature = "sphere2-s4")]
+            s4_rstack: [0; 128],
             root_best: MOVE_NONE,
             #[cfg(feature = "corrhist")]
             corr_hist: Box::new([[0; CORR_SIZE]; 2]),
@@ -659,6 +698,42 @@ fn alpha_beta(
 
     let improving = !in_check && ply >= 2 && ply < 128 && static_eval > info.eval_stack[ply - 2];
 
+    #[cfg(feature = "sphere2-s4")]
+    let (s4_bucket, s4_radius) = {
+        let computed = if !in_check && depth >= S4_MIN_DEPTH && nnue::is_active() {
+            board.ensure_acc_computed();
+            let acc = &board.accumulator_q;
+            let view = match board.side {
+                Color::White => &acc.white[nnue::king_bucket_of(board.king_sq(Color::White))],
+                Color::Black => &acc.black[nnue::king_bucket_of(board.king_sq(Color::Black) ^ 56)],
+            };
+            let b = sketch::simhash12_sub(view) as usize & (S4_SIZE - 1);
+            let r = if tt.s4_n[b] >= S4_MIN_N {
+                if tt.s4_field[b] > S4_HOT {
+                    1
+                } else if tt.s4_field[b] < S4_COLD {
+                    -1
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            Some((b as i32, r))
+        } else {
+            None
+        };
+        let (b, r) = match computed {
+            Some((b, r)) => (b, r),
+            None if ply >= 1 && ply < 128 => (-1, info.s4_rstack[ply - 1] as i32),
+            None => (-1, 0),
+        };
+        if ply < 128 {
+            info.s4_rstack[ply] = r as i8;
+        }
+        (b, r)
+    };
+
     if !in_check && depth <= 3 && ply > 0 {
         let margin = if improving { 100 * depth } else { 120 * depth };
         if static_eval - margin >= beta {
@@ -721,7 +796,6 @@ fn alpha_beta(
 
     let mut scores = score_moves(&list, board, info, ply, tt_move, exp, prev_move);
 
-<<<<<<< HEAD
     #[cfg(feature = "sphere-search")]
     if ply >= 1 && depth <= SPHERE_MAX_DEPTH && board.all_occupancy.count_ones() > 5 {
         let mut in_tail = [false; 256];
@@ -798,7 +872,7 @@ fn alpha_beta(
                 Color::White => &acc.white[nnue::king_bucket_of(board.king_sq(Color::White))],
                 Color::Black => &acc.black[nnue::king_bucket_of(board.king_sq(Color::Black) ^ 56)],
             };
-            (probe::simhash12(view), probe::simhash12_sub(view))
+            (sketch::simhash12(view), sketch::simhash12_sub(view))
         } else {
             (-1, -1)
         };
@@ -837,6 +911,8 @@ fn alpha_beta(
         if !in_check && !is_pv && !protected_quiet {
             if depth <= LMP_DEPTH_MAX {
                 let lmp_limit = LMP_BASE + LMP_STEP * (depth as usize);
+                #[cfg(feature = "sphere2-s4")]
+                let lmp_limit = ((lmp_limit as i32) + 2 * s4_radius).max(2) as usize;
                 if moves_searched >= lmp_limit {
                     #[cfg(feature = "sphere2-probe")]
                     if let Some(p) = prb.as_mut() {
@@ -853,6 +929,10 @@ fn alpha_beta(
                 let mut futility_margin = FUTILITY_MARGIN_BASE + FUTILITY_MARGIN_STEP * depth;
                 if improving {
                     futility_margin -= FUTILITY_IMPROVING_BONUS;
+                }
+                #[cfg(feature = "sphere2-s4")]
+                {
+                    futility_margin += 30 * s4_radius;
                 }
                 if static_eval + futility_margin <= alpha {
                     #[cfg(feature = "sphere2-probe")]
@@ -897,6 +977,11 @@ fn alpha_beta(
 
             if improving {
                 reduction -= 1;
+            }
+
+            #[cfg(feature = "sphere2-s4")]
+            {
+                reduction -= s4_radius;
             }
 
             let hist_score = info.history[board.side.index()][m.from_sq() as usize][m.to_sq() as usize];
@@ -988,6 +1073,14 @@ fn alpha_beta(
                     if let Some(p) = prb.as_ref() {
                         probe::emit(p, depth, ply, board.all_occupancy.count_ones(), in_check, static_eval, score, 'b');
                     }
+                    #[cfg(feature = "sphere2-s4")]
+                    if s4_bucket >= 0 && !in_check && best_score.abs() < MATE_SCORE - 1024 {
+                        let b = s4_bucket as usize;
+                        let sur = (best_score - static_eval).abs().min(2000);
+                        let w = (depth + 1).min(16);
+                        tt.s4_field[b] = (tt.s4_field[b] * (256 - w) + sur * S4_GRAIN * w) / 256;
+                        tt.s4_n[b] = tt.s4_n[b].saturating_add(1);
+                    }
                     return beta;
                 }
             }
@@ -1013,6 +1106,14 @@ fn alpha_beta(
     #[cfg(feature = "sphere2-probe")]
     if let Some(p) = prb.as_ref() {
         probe::emit(p, depth, ply, board.all_occupancy.count_ones(), in_check, static_eval, best_score, 'f');
+    }
+    #[cfg(feature = "sphere2-s4")]
+    if s4_bucket >= 0 && !in_check && best_score.abs() < MATE_SCORE - 1024 {
+        let b = s4_bucket as usize;
+        let sur = (best_score - static_eval).abs().min(2000);
+        let w = (depth + 1).min(16);
+        tt.s4_field[b] = (tt.s4_field[b] * (256 - w) + sur * S4_GRAIN * w) / 256;
+        tt.s4_n[b] = tt.s4_n[b].saturating_add(1);
     }
     alpha
 }
