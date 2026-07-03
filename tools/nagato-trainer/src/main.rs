@@ -176,9 +176,9 @@ fn main() {
     let threads = env_parse::<usize>("NAGATO_THREADS").unwrap_or(THREADS);
     let workers = env_parse::<usize>("NAGATO_WORKERS").unwrap_or(BINPACK_WORKERS);
 
-    // Notebook-07 remedy: raise the LR floor (0.3^5 -> 0.3^4) so Adam steps keep
-    // pace with weight decay near the end, curbing the late FT (l0w) contraction.
-    let final_lr = INITIAL_LR * 0.3f32.powi(4);
+    // v5 verdict: the raised floor (0.3^4) under-converged the net — search-exploitable
+    // eval blind spots despite healthy loss. Reverted to the v4f floor.
+    let final_lr = INITIAL_LR * 0.3f32.powi(5);
     let fmt = nagt_save_format();
 
     let mut trainer = ValueTrainerBuilder::default()
