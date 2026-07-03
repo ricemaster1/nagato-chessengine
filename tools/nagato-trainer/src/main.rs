@@ -64,7 +64,7 @@ fn keep_entry(entry: &TrainingDataEntry) -> bool {
 const NAGT_MAGIC: &[u8; 4] = b"NAGT";
 const NAGT_VERSION: u32 = 4;
 
-const NET_ID: &str = "nagato-halfka-v5";
+const NET_ID: &str = "nagato-halfka-v6a";
 const SUPERBATCHES: usize = 600;
 const BATCH_SIZE: usize = 16_384;
 const BATCHES_PER_SB: usize = 6104;
