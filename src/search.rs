@@ -30,6 +30,36 @@ const SPHERE_QUIET_THRESHOLD: usize = 4;
 #[cfg(feature = "sphere-search")]
 const SPHERE_MAX_DEPTH: i32 = 6;
 
+#[cfg(feature = "conthist")]
+const CONT_HIST_SIZE: usize = 6 * 64 * 6 * 64;
+#[cfg(feature = "conthist")]
+const CONT_HIST_MAX: i32 = 16_384;
+
+#[cfg(feature = "conthist")]
+#[inline]
+fn ch_idx(prev_piece: usize, prev_to: usize, piece: usize, to: usize) -> usize {
+    ((prev_piece * 64 + prev_to) * 6 + piece) * 64 + to
+}
+
+#[cfg(feature = "conthist")]
+fn update_cont_hist(info: &mut SearchInfo, ply: usize, prev_move: Move, m: Move, bonus: i32) {
+    let cp = m.piece().index();
+    let ct = m.to_sq() as usize;
+    if !prev_move.is_null() {
+        let idx = ch_idx(prev_move.piece().index(), prev_move.to_sq() as usize, cp, ct);
+        let e = &mut info.cont_hist[0][idx];
+        *e = (*e as i32 + bonus).clamp(-CONT_HIST_MAX, CONT_HIST_MAX) as i16;
+    }
+    if ply >= 2 {
+        let p2 = info.move_stack[ply - 2];
+        if !p2.is_null() {
+            let idx = ch_idx(p2.piece().index(), p2.to_sq() as usize, cp, ct);
+            let e = &mut info.cont_hist[1][idx];
+            *e = (*e as i32 + bonus).clamp(-CONT_HIST_MAX, CONT_HIST_MAX) as i16;
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TTFlag {
     None,
@@ -154,6 +184,11 @@ pub struct SearchInfo {
 
     #[cfg(feature = "corrhist")]
     pub corr_hist: Box<[[i32; CORR_SIZE]; 2]>,
+
+    #[cfg(feature = "conthist")]
+    pub move_stack: [Move; 128],
+    #[cfg(feature = "conthist")]
+    pub cont_hist: [Box<[i16]>; 2],
 }
 
 impl SearchInfo {
@@ -171,6 +206,10 @@ impl SearchInfo {
             root_best: MOVE_NONE,
             #[cfg(feature = "corrhist")]
             corr_hist: Box::new([[0; CORR_SIZE]; 2]),
+            #[cfg(feature = "conthist")]
+            move_stack: [MOVE_NONE; 128],
+            #[cfg(feature = "conthist")]
+            cont_hist: std::array::from_fn(|_| vec![0i16; CONT_HIST_SIZE].into_boxed_slice()),
         }
     }
 
@@ -190,6 +229,12 @@ impl SearchInfo {
         for s in 0..2 {
             for i in 0..CORR_SIZE {
                 self.corr_hist[s][i] /= 2;
+            }
+        }
+        #[cfg(feature = "conthist")]
+        for table in self.cont_hist.iter_mut() {
+            for v in table.iter_mut() {
+                *v /= 2;
             }
         }
     }
@@ -258,6 +303,20 @@ fn score_moves(list: &MoveList, board: &Board, info: &SearchInfo, ply: usize, tt
             scores[i] = 650_000;
         } else {
             scores[i] = info.history[board.side.index()][m.from_sq() as usize][m.to_sq() as usize];
+            #[cfg(feature = "conthist")]
+            {
+                if !prev_move.is_null() {
+                    let idx = ch_idx(prev_move.piece().index(), prev_move.to_sq() as usize, m.piece().index(), m.to_sq() as usize);
+                    scores[i] += info.cont_hist[0][idx] as i32;
+                }
+                if ply >= 2 {
+                    let p2 = info.move_stack[ply - 2];
+                    if !p2.is_null() {
+                        let idx = ch_idx(p2.piece().index(), p2.to_sq() as usize, m.piece().index(), m.to_sq() as usize);
+                        scores[i] += info.cont_hist[1][idx] as i32;
+                    }
+                }
+            }
         }
     }
     scores
@@ -512,6 +571,10 @@ fn alpha_beta(
                 || (our_rooks != 0 && minor_count >= 1));
 
         if null_safe {
+            #[cfg(feature = "conthist")]
+            if ply < 128 {
+                info.move_stack[ply] = MOVE_NONE;
+            }
             board.make_null_move();
             let r = if depth >= 6 { 3 } else { 2 };
             let null_score = -alpha_beta(board, tt, info, exp, depth - 1 - r, -beta, -beta + 1, ply + 1, false, MOVE_NONE);
@@ -577,6 +640,10 @@ fn alpha_beta(
                 }
                 if !board.make_move(m) {
                     continue;
+                }
+                #[cfg(feature = "conthist")]
+                if ply < 128 {
+                    info.move_stack[ply] = m;
                 }
 
                 let reduced_depth = (depth - 1 - PROBCUT_REDUCTION).max(1);
@@ -679,6 +746,10 @@ fn alpha_beta(
         if !board.make_move(m) {
             continue;
         }
+        #[cfg(feature = "conthist")]
+        if ply < 128 {
+            info.move_stack[ply] = m;
+        }
 
         let mut score;
 
@@ -737,6 +808,8 @@ fn alpha_beta(
 
         if quiet_move && score <= alpha_before_move {
             info.history[mover][from_sq][to_sq] = (info.history[mover][from_sq][to_sq] - depth * depth).clamp(-32_000, 32_000);
+            #[cfg(feature = "conthist")]
+            update_cont_hist(info, ply, prev_move, m, -(depth * depth).min(CONT_HIST_MAX / 2));
         }
 
         if info.stopped {
@@ -768,6 +841,9 @@ fn alpha_beta(
                         if !prev_move.is_null() {
                             info.counter_moves[prev_move.piece().index()][prev_move.to_sq() as usize] = m;
                         }
+
+                        #[cfg(feature = "conthist")]
+                        update_cont_hist(info, ply, prev_move, m, (depth * depth).min(CONT_HIST_MAX / 2));
                     }
 
                     #[cfg(feature = "corrhist")]
@@ -908,6 +984,10 @@ pub fn search_threads(
 
                         if !local_board.make_move(m) {
                             continue;
+                        }
+                        #[cfg(feature = "conthist")]
+                        {
+                            info.move_stack[0] = m;
                         }
 
                         let mut score;

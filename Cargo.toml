@@ -16,6 +16,7 @@ sphere-search = []
 # Correction history: blend historical (search - static eval) error into the
 # static eval, keyed by pawn structure + side. Default on (SPRT +10.4 +/- 7.7).
 corrhist = []
+conthist = []
 
 [dependencies]
 rand = "0.8"
