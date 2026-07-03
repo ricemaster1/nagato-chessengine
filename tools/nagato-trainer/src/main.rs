@@ -64,7 +64,7 @@ fn keep_entry(entry: &TrainingDataEntry) -> bool {
 const NAGT_MAGIC: &[u8; 4] = b"NAGT";
 const NAGT_VERSION: u32 = 4;
 
-const NET_ID: &str = "nagato-halfka-v4f";
+const NET_ID: &str = "nagato-halfka-v5";
 const SUPERBATCHES: usize = 600;
 const BATCH_SIZE: usize = 16_384;
 const BATCHES_PER_SB: usize = 6104;
@@ -176,7 +176,9 @@ fn main() {
     let threads = env_parse::<usize>("NAGATO_THREADS").unwrap_or(THREADS);
     let workers = env_parse::<usize>("NAGATO_WORKERS").unwrap_or(BINPACK_WORKERS);
 
-    let final_lr = INITIAL_LR * 0.3f32.powi(5);
+    // Notebook-07 remedy: raise the LR floor (0.3^5 -> 0.3^4) so Adam steps keep
+    // pace with weight decay near the end, curbing the late FT (l0w) contraction.
+    let final_lr = INITIAL_LR * 0.3f32.powi(4);
     let fmt = nagt_save_format();
 
     let mut trainer = ValueTrainerBuilder::default()
