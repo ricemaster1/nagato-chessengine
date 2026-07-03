@@ -41,12 +41,13 @@ mod probe {
         pub exp_miss: i32,
         pub tail_n: i32,
         pub tail_novel: i32,
-        pub novel_moves: [u32; 8],
+        pub novel_moves: [u32; 64],
         pub lmp_pruned: i32,
         pub lmp_novel: i32,
         pub fut_pruned: i32,
         pub fut_novel: i32,
         pub bucket: i32,
+        pub bucket2: i32,
         pub researched: i32,
         pub best_idx: i32,
     }
@@ -59,7 +60,7 @@ mod probe {
         OUT.get_or_init(|| {
             let path = std::env::var("NAGATO_SPHERE2_LOG").unwrap_or_else(|_| "sphere2_probe.csv".into());
             let mut w = BufWriter::new(File::create(path).expect("sphere2 probe log"));
-            writeln!(w, "kind,depth,ply,pieces,in_check,static_eval,turb,exp_miss,tail_n,tail_novel,lmp_pruned,lmp_novel,fut_pruned,fut_novel,bucket,best,surprise,researched,best_idx,exit,mv").ok();
+            writeln!(w, "kind,depth,ply,pieces,in_check,static_eval,turb,exp_miss,tail_n,tail_novel,lmp_pruned,lmp_novel,fut_pruned,fut_novel,bucket,bucket2,best,surprise,researched,best_idx,exit,mv").ok();
             Mutex::new(w)
         })
     }
@@ -103,22 +104,39 @@ mod probe {
         bits
     }
 
+    pub fn simhash12_sub(acc: &[i16; 256]) -> i32 {
+        let p = proj();
+        let mut bits = 0i32;
+        for (k, row) in p.iter().enumerate() {
+            let mut dot = 0i64;
+            let mut i = 0;
+            while i < 256 {
+                dot += row[i] as i64 * acc[i] as i64;
+                i += 4;
+            }
+            if dot > 0 {
+                bits |= 1 << k;
+            }
+        }
+        bits
+    }
+
     pub fn emit(r: &Rec, depth: i32, ply: usize, pieces: u32, in_check: bool, static_eval: i32, best: i32, exit: char) {
         let surprise = if in_check { -1 } else { (best - static_eval).abs() };
         let mut w = out().lock().unwrap();
         writeln!(
             w,
-            "n,{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},",
+            "n,{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},",
             depth, ply, pieces, in_check as i32, static_eval, r.turb, r.exp_miss,
             r.tail_n, r.tail_novel, r.lmp_pruned, r.lmp_novel, r.fut_pruned, r.fut_novel,
-            r.bucket, best, surprise, r.researched, r.best_idx, exit
+            r.bucket, r.bucket2, best, surprise, r.researched, r.best_idx, exit
         ).ok();
         let _ = w.flush();
     }
 
     pub fn emit_root(depth: i32, score: i32, mv: String) {
         let mut w = out().lock().unwrap();
-        writeln!(w, "r,{depth},0,0,0,0,-1,-1,0,0,0,0,0,0,-1,{score},-1,0,-1,r,{mv}").ok();
+        writeln!(w, "r,{depth},0,0,0,0,-1,-1,0,0,0,0,0,0,-1,-1,{score},-1,0,-1,r,{mv}").ok();
         let _ = w.flush();
     }
 }
@@ -746,9 +764,9 @@ fn alpha_beta(
         let us = board.side.index();
         let mut tail_n = 0i32;
         let mut tail_novel = 0i32;
-        let mut novel_moves = [0u32; 8];
+        let mut novel_moves = [0u32; 64];
         for i in 0..list.len() {
-            if tail_n >= 8 {
+            if tail_n >= 64 {
                 break;
             }
             let m = list.moves[i];
@@ -773,16 +791,16 @@ fn alpha_beta(
             }
             tail_n += 1;
         }
-        let bucket = if !in_check && nnue::is_active() {
+        let (bucket, bucket2) = if !in_check && nnue::is_active() {
             board.ensure_acc_computed();
             let acc = &board.accumulator_q;
             let view = match board.side {
                 Color::White => &acc.white[nnue::king_bucket_of(board.king_sq(Color::White))],
                 Color::Black => &acc.black[nnue::king_bucket_of(board.king_sq(Color::Black) ^ 56)],
             };
-            probe::simhash12(view)
+            (probe::simhash12(view), probe::simhash12_sub(view))
         } else {
-            -1
+            (-1, -1)
         };
         Some(probe::Rec {
             turb,
@@ -795,6 +813,7 @@ fn alpha_beta(
             fut_pruned: 0,
             fut_novel: 0,
             bucket,
+            bucket2,
             researched: 0,
             best_idx: -1,
         })
