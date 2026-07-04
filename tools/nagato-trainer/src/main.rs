@@ -175,6 +175,12 @@ fn main() {
     let wdl = wdl_override.unwrap_or(WDL_PROPORTION);
     let threads = env_parse::<usize>("NAGATO_THREADS").unwrap_or(THREADS);
     let workers = env_parse::<usize>("NAGATO_WORKERS").unwrap_or(BINPACK_WORKERS);
+    let superbatches = env_parse::<usize>("NAGATO_SB").unwrap_or(SUPERBATCHES);
+    let net_id = if superbatches != SUPERBATCHES {
+        format!("{net_id}-p{superbatches}")
+    } else {
+        net_id
+    };
 
     // v5 verdict: the raised floor (0.3^4) under-converged the net — search-exploitable
     // eval blind spots despite healthy loss. Reverted to the v4f floor.
@@ -216,10 +222,10 @@ fn main() {
             batch_size: BATCH_SIZE,
             batches_per_superbatch: BATCHES_PER_SB,
             start_superbatch: 1,
-            end_superbatch: SUPERBATCHES,
+            end_superbatch: superbatches,
         },
         wdl_scheduler: wdl::ConstantWDL { value: wdl },
-        lr_scheduler: lr::CosineDecayLR { initial_lr: INITIAL_LR, final_lr, final_superbatch: SUPERBATCHES },
+        lr_scheduler: lr::CosineDecayLR { initial_lr: INITIAL_LR, final_lr, final_superbatch: superbatches },
         save_rate: SAVE_RATE,
     };
 
