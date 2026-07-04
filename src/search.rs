@@ -7,7 +7,7 @@ use crate::learn::ExpTable;
 use crate::movegen;
 use crate::moves::*;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::thread;
 use std::time::Instant;
 
@@ -40,7 +40,6 @@ pub enum TTFlag {
 
 #[derive(Clone, Copy)]
 pub struct TTEntry {
-    pub hash: u64,
     pub depth: i8,
     pub score: i32,
     pub flag: TTFlag,
@@ -48,65 +47,109 @@ pub struct TTEntry {
     pub generation: u8,
 }
 
-impl TTEntry {
-    const EMPTY: TTEntry = TTEntry {
-        hash: 0,
-        depth: 0,
-        score: 0,
-        flag: TTFlag::None,
-        best_move: MOVE_NONE,
-        generation: 0,
-    };
+const TT_FLAGS: [TTFlag; 4] = [TTFlag::None, TTFlag::Exact, TTFlag::Alpha, TTFlag::Beta];
+
+#[inline]
+fn tt_flag_code(flag: TTFlag) -> u64 {
+    match flag {
+        TTFlag::None => 0,
+        TTFlag::Exact => 1,
+        TTFlag::Alpha => 2,
+        TTFlag::Beta => 3,
+    }
+}
+
+#[inline]
+fn tt_pack(depth: i8, score: i32, flag: TTFlag, best_move: Move, gen: u8) -> u64 {
+    (best_move.0 as u64)
+        | ((score as i16 as u16 as u64) << 32)
+        | ((depth as u8 as u64) << 48)
+        | (tt_flag_code(flag) << 56)
+        | (((gen & 0x3f) as u64) << 58)
+}
+
+#[inline]
+fn tt_unpack(data: u64) -> TTEntry {
+    TTEntry {
+        best_move: Move(data as u32),
+        score: (data >> 32) as u16 as i16 as i32,
+        depth: (data >> 48) as u8 as i8,
+        flag: TT_FLAGS[((data >> 56) & 0x3) as usize],
+        generation: ((data >> 58) & 0x3f) as u8,
+    }
+}
+
+#[repr(align(64))]
+struct TTBucket {
+    entries: [(AtomicU64, AtomicU64); TT_BUCKET_SIZE],
 }
 
 pub struct TranspositionTable {
-    buckets: Vec<[TTEntry; TT_BUCKET_SIZE]>,
+    buckets: Vec<TTBucket>,
     num_buckets: usize,
-    pub generation: u8,
+    generation: AtomicU8,
 }
 
 impl TranspositionTable {
     pub fn new(size_mb: usize) -> Self {
-        let bucket_size = std::mem::size_of::<[TTEntry; TT_BUCKET_SIZE]>();
+        let bucket_size = std::mem::size_of::<TTBucket>();
         let num_buckets = (size_mb * 1024 * 1024) / bucket_size;
+        let mut buckets = Vec::with_capacity(num_buckets);
+        for _ in 0..num_buckets {
+            buckets.push(TTBucket {
+                entries: std::array::from_fn(|_| (AtomicU64::new(0), AtomicU64::new(0))),
+            });
+        }
         TranspositionTable {
-            buckets: vec![[TTEntry::EMPTY; TT_BUCKET_SIZE]; num_buckets],
+            buckets,
             num_buckets,
-            generation: 0,
+            generation: AtomicU8::new(0),
         }
     }
 
-    pub fn new_generation(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
+    #[inline]
+    pub fn generation(&self) -> u8 {
+        self.generation.load(Ordering::Relaxed) & 0x3f
+    }
+
+    pub fn new_generation(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
-    pub fn probe(&self, hash: u64) -> Option<&TTEntry> {
+    pub fn probe(&self, hash: u64) -> Option<TTEntry> {
         let idx = (hash as usize) % self.num_buckets;
-        let bucket = &self.buckets[idx];
-        for entry in bucket.iter() {
-            if entry.hash == hash && entry.flag != TTFlag::None {
-                return Some(entry);
+        for (key_xor, data) in self.buckets[idx].entries.iter() {
+            let d = data.load(Ordering::Relaxed);
+            let k = key_xor.load(Ordering::Relaxed);
+            if k ^ d == hash {
+                let entry = tt_unpack(d);
+                if entry.flag != TTFlag::None {
+                    return Some(entry);
+                }
             }
         }
         None
     }
 
     #[inline]
-    pub fn store(&mut self, hash: u64, depth: i8, score: i32, flag: TTFlag, best_move: Move) {
+    pub fn store(&self, hash: u64, depth: i8, score: i32, flag: TTFlag, best_move: Move) {
         let idx = (hash as usize) % self.num_buckets;
-        let bucket = &mut self.buckets[idx];
-        let gen = self.generation;
+        let gen = self.generation();
+        let bucket = &self.buckets[idx];
 
         let mut replace_idx = 0;
         let mut worst_value = i32::MAX;
 
-        for (i, entry) in bucket.iter().enumerate() {
+        for (i, (key_xor, data)) in bucket.entries.iter().enumerate() {
+            let d = data.load(Ordering::Relaxed);
+            let k = key_xor.load(Ordering::Relaxed);
+            let entry = tt_unpack(d);
             if entry.flag == TTFlag::None {
                 replace_idx = i;
                 break;
             }
-            if entry.hash == hash {
+            if k ^ d == hash {
                 replace_idx = i;
                 break;
             }
@@ -118,19 +161,18 @@ impl TranspositionTable {
             }
         }
 
-        bucket[replace_idx] = TTEntry {
-            hash,
-            depth,
-            score,
-            flag,
-            best_move,
-            generation: gen,
-        };
+        let d = tt_pack(depth, score, flag, best_move, gen);
+        let (key_xor, data) = &bucket.entries[replace_idx];
+        data.store(d, Ordering::Relaxed);
+        key_xor.store(hash ^ d, Ordering::Relaxed);
     }
 
-    pub fn clear(&mut self) {
-        for bucket in self.buckets.iter_mut() {
-            *bucket = [TTEntry::EMPTY; TT_BUCKET_SIZE];
+    pub fn clear(&self) {
+        for bucket in self.buckets.iter() {
+            for (key_xor, data) in bucket.entries.iter() {
+                data.store(0, Ordering::Relaxed);
+                key_xor.store(0, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -387,7 +429,7 @@ fn quiescence(board: &mut Board, mut alpha: i32, beta: i32, info: &mut SearchInf
 
 fn alpha_beta(
     board: &mut Board,
-    tt: &mut TranspositionTable,
+    tt: &TranspositionTable,
     info: &mut SearchInfo,
     exp: &ExpTable,
     mut depth: i32,
@@ -1045,7 +1087,7 @@ pub fn search_threads(
     }
 }
 
-pub fn search(board: &mut Board, tt: &mut TranspositionTable, exp: &ExpTable, time_limit_ms: u64, max_depth: i32) -> SearchResult {
+pub fn search(board: &mut Board, tt: &TranspositionTable, exp: &ExpTable, time_limit_ms: u64, max_depth: i32) -> SearchResult {
     let mut info = SearchInfo::new();
     let start_time = Instant::now();
     info.start_time = start_time;
@@ -1200,6 +1242,29 @@ mod tests {
     fn setup() {
         crate::zobrist::init();
         crate::movegen::init();
+    }
+
+    #[test]
+    fn test_tt_concurrent_hammer() {
+        let tt = TranspositionTable::new(4);
+        thread::scope(|scope| {
+            for t in 0..8u64 {
+                let tt = &tt;
+                scope.spawn(move || {
+                    for i in 0..200_000u64 {
+                        let hash = (t << 32) ^ i.wrapping_mul(0x9e3779b97f4a7c15);
+                        let score = (hash as i16 as i32) % 20000;
+                        let mv = Move(hash as u32);
+                        tt.store(hash, (hash >> 8) as i8, score, TTFlag::Exact, mv);
+                        if let Some(e) = tt.probe(hash) {
+                            assert_eq!(e.score, score as i16 as i32);
+                            assert_eq!(e.best_move.0, mv.0);
+                            assert_eq!(e.depth, (hash >> 8) as i8);
+                        }
+                    }
+                });
+            }
+        });
     }
 
     #[test]
